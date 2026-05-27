@@ -18,7 +18,7 @@ from serial_tx import (
 DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
 WINDOWS_TITLE = 'SerialChart'
 VERSION_MAJOR = 0
-VERSION_MINOR = 2
+VERSION_MINOR = 3
 VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
 
 # ===== Serial 設定 =====
