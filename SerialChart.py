@@ -11,7 +11,7 @@ from enum import IntEnum
 
 DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
 VERSION_MAJOR = 0
-VERSION_MINOR = 0
+VERSION_MINOR = 2
 VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
 
 # ===== Serial 設定 =====
