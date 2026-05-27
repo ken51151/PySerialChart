@@ -10,6 +10,7 @@ from pyqtgraph.Qt import QtWidgets, QtCore
 from enum import IntEnum
 
 DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
+WINDOWS_TITLE = 'SerialChart'
 VERSION_MAJOR = 0
 VERSION_MINOR = 0
 VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
@@ -22,7 +23,6 @@ BAUD = 115200
 MAX_POINTS = 50000              # curve ring buffer size
 MAX_LINES = 10                  # max curve (only multi line mode)
 UPDATE_INTERVAL = 30            # update interval [ms]
-X_FOLLOW_WIDTH_DEFAULT = 2000   # default X width while following latest data
 
 # @@@@@ 資料分段方式, 特定資料 or 固定長度
 class SEP_MODES(IntEnum):
@@ -72,17 +72,25 @@ CUSTOM_END = ASCII_LF       # 僅在CUSTOM_END模式下有效, 特定資料進�
 # @@@@@ 固定長度分段設定
 LEN_END = 5                 # 僅在LENGTH模式下有效
 
-# @@@@@ 通用設定
+# @@@@@ General Setting
 VAL_OFFSET = 0              # 數值分段後的固定位移, 除了MULTI_LINE_ASCII以外的所有模式都會受影響, 不會檢查是否溢出
 SEP = CUSTOM_END.encode()   # 預先計算分隔符避免即時運算的花費
+
+
+# @@@@@ Tx setting
 TX_ENCODING = 'utf-8'
 TX_LINE_ENDINGS = {
     'None': '',
-    'LF': '\n',
-    'CR': '\r',
+    'LF (\\n)': '\n',
+    'CR (\\r)': '\r',
     'CRLF': '\r\n',
 }
 TX_HISTORY_LIMIT = 50
+
+# @@@@@ UI component
+X_FOLLOW_WIDTH_DEFAULT = 2000   # default X width while following latest data
+UI_FONT_FAMILY = "Microsoft JhengHei UI"
+UI_FONT_POINT_DELTA = 2
 
 # --------------------------------------------------------
 # table for value mode
@@ -241,14 +249,20 @@ class SerialPlot:
     def __init__(self):
         # 初始化 Qt Window
         self.app = QtWidgets.QApplication(sys.argv)
+        font = self.app.font()
+        font.setFamily(UI_FONT_FAMILY)
+        if font.pointSize() > 0:
+            font.setPointSize(font.pointSize() + UI_FONT_POINT_DELTA)
+        else:
+            font.setPointSizeF(font.pointSizeF() + UI_FONT_POINT_DELTA)
+        self.app.setFont(font)
         self.main_win = QtWidgets.QMainWindow()
-        self.main_win.setWindowTitle(f"SerialChart v{VERSION}")
+        self.main_win.setWindowTitle(f"{WINDOWS_TITLE} v{VERSION}")
         self.main_win.resize(800, 600)
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
-        self.status_bar = QtWidgets.QStatusBar()
-        self.main_win.setStatusBar(self.status_bar)
+   
 
         # 頂部控制區
         self.controls_layout = QtWidgets.QHBoxLayout()
@@ -257,9 +271,11 @@ class SerialPlot:
         self.btn_rectMode = QtWidgets.QCheckBox("&RectMode")
         self.btn_rectMode.toggled.connect(self.rect_mode_toggle)
         self.btn_connect = QtWidgets.QPushButton("")
+        self.btn_connect.setFixedSize(100, 30)
         self.btn_connect.setCheckable(True)
         self.btn_connect.toggled.connect(self.conncet_toggle)
         self.btn_autoY = QtWidgets.QPushButton("Auto&Y")
+        self.btn_autoY.setFixedSize(80, 30)
         self.btn_autoY.clicked.connect(self.auto_y)
         self.btn_followX = QtWidgets.QCheckBox("Follow&X")
         self.btn_followX.setChecked(True)
@@ -268,10 +284,11 @@ class SerialPlot:
         self.spin_x_width.setRange(1, MAX_POINTS)
         self.spin_x_width.setValue(X_FOLLOW_WIDTH_DEFAULT)
         self.spin_x_width.setSuffix(" pts")
-        self.spin_x_width.setFixedWidth(100)
+        self.spin_x_width.setFixedSize(120, 30)
         self.spin_x_width.setSingleStep(100)
         self.spin_x_width.valueChanged.connect(self.update_x_range)
         self.btn_clear = QtWidgets.QPushButton("Clear🧹")
+        self.btn_clear.setFixedSize(100, 30)
         self.btn_clear.clicked.connect(self.clear_data)
         self.controls_layout.addWidget(self.btn_connect)
         self.controls_layout.addWidget(self.btn_cursor)
@@ -284,39 +301,46 @@ class SerialPlot:
 
         # 傳送控制區
         self.tx_layout = QtWidgets.QHBoxLayout()
-        self.tx_label = QtWidgets.QLabel("TX:")
+        self.tx_layout.setSpacing(12)
+        self.tx_label = QtWidgets.QLabel("TX: ")
         self.tx_input = TxHistoryComboBox()
-        self.tx_input.setFixedWidth(260)
+        self.tx_input.setFixedHeight(30)
+        self.tx_input.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.tx_input.lineEdit().returnPressed.connect(self.send_tx_input)
         self.combo_tx_line_end = QtWidgets.QComboBox()
+        self.combo_tx_line_end.setFixedSize(90, 30)
         self.combo_tx_line_end.addItems(TX_LINE_ENDINGS.keys())
-        self.combo_tx_line_end.setCurrentText('LF')
-        self.combo_tx_line_end.setFixedWidth(70)
+        self.combo_tx_line_end.setCurrentText('LF (\\n)')
         self.btn_send = QtWidgets.QPushButton("&Send")
-        self.btn_send.setFixedWidth(45)
+        self.btn_send.setFixedSize(80, 30)
         self.btn_send.clicked.connect(self.send_tx_input)
-        self.tx_status = QtWidgets.QLabel("")
-        self.com_status_icon = QtWidgets.QLabel("")
-        self.status_bar.addWidget(self.com_status_icon)
-        self.status_bar.addWidget(self.tx_status, 1)
-        self.tx_layout.addWidget(self.tx_label)
-        self.tx_layout.addWidget(self.tx_input)
+        self.tx_layout.addWidget(self.tx_label, 0)
+        self.tx_layout.addWidget(self.tx_input, 1)
         self.tx_layout.addWidget(self.combo_tx_line_end)
         self.tx_layout.addWidget(self.btn_send)
-        self.tx_layout.addStretch()
+        # self.tx_layout.addStretch()       // add stretch in right side
 
         # 曲線圖
         self.residual = b""                     # 儲存末端的不完整資料
         self.win = pg.GraphicsLayoutWidget()
+        self.win.setMinimumHeight(200)
         self.plot = self.win.addPlot()
         self.plot.showGrid(x=True, y=True)
         self.plot.setYRange(-2000, 2000, padding=0.05)
         self.plot.setXRange(0, X_FOLLOW_WIDTH_DEFAULT, padding=0)
 
+        # 狀態列
+        self.com_status_icon = QtWidgets.QLabel("")
+        self.tx_status = QtWidgets.QLabel("")
+        self.status_bar = QtWidgets.QStatusBar()
+        self.status_bar.addWidget(self.com_status_icon)
+        self.status_bar.addWidget(self.tx_status, 1)
+
         # 將元件加入layout
         self.layout.addLayout(self.controls_layout)
         self.layout.addLayout(self.tx_layout)
         self.layout.addWidget(self.win)
+        self.main_win.setStatusBar(self.status_bar)
 
         # 輔助線
         self.vLine = pg.InfiniteLine(angle=90, movable=False, pen='w')
@@ -332,6 +356,7 @@ class SerialPlot:
         # self.plot.setClipToView(True)           # 只畫出目前視窗看得到的點
 
         # others
+        print(f"{WINDOWS_TITLE} v{VERSION}")
         info = ""
         offset = VAL_OFFSET
         self.ser = serial.Serial(baudrate=BAUD, timeout=0.1)
@@ -606,7 +631,7 @@ class SerialPlot:
     def conncet_toggle(self, checked):
         if checked:
             self.btn_connect.setStyleSheet("background-color : palegreen")
-            self.btn_connect.setText("🟢Running")
+            self.btn_connect.setText("🟢 Running")
             self.clear_data()
             self.timer.start(UPDATE_INTERVAL)
             self.ser.open()
@@ -614,18 +639,18 @@ class SerialPlot:
             self.tx_input.setEnabled(True)
             self.combo_tx_line_end.setEnabled(True)
             self.btn_send.setEnabled(True)
-            self.com_status_icon.setText("🟢 COM open")
-            self.tx_status.setText("")
+            self.com_status_icon.setText("🟢")
+            self.tx_status.setText("COM opened")
         else:
             self.timer.stop()
             self.btn_connect.setStyleSheet("background-color : lightpink")
-            self.btn_connect.setText("🔴Stop")
+            self.btn_connect.setText("🔴 Stop")
             if self.ser.is_open:
                 self.ser.close()
             self.tx_input.setEnabled(False)
             self.combo_tx_line_end.setEnabled(False)
             self.btn_send.setEnabled(False)
-            self.com_status_icon.setText("🔴 COM closed")
+            self.com_status_icon.setText("🔴")
             self.tx_status.setText("COM closed")
         
     # ----- RectMode
