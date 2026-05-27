@@ -2,6 +2,7 @@ import serial
 from pyqtgraph.Qt import QtWidgets, QtCore
 
 # ========================================================
+HEX_TX_PREFIX = 'hex:'
 TX_ENCODING = 'utf-8'
 TX_WRITE_TIMEOUT = 0
 TX_TIMEOUT_STATUS = "TX timeout"
@@ -12,6 +13,31 @@ TX_LINE_ENDINGS = {
     'CRLF': '\r\n',
 }
 TX_HISTORY_LIMIT = 50
+
+# ========================================================
+def parse_tx_input(text, line_end):
+    if text.lower().startswith(HEX_TX_PREFIX):
+        return parse_hex_tx(text)
+    return (text + line_end).encode(TX_ENCODING), text, False
+
+# ========================================================
+def parse_hex_tx(text):
+    hex_text = text[len(HEX_TX_PREFIX):].strip()
+    if not hex_text:
+        raise ValueError("HEX empty")
+
+    hex_text = hex_text.replace(",", " ")
+    hex_text = "".join(hex_text.split())
+
+    if len(hex_text) % 2 != 0:
+        raise ValueError("HEX length must be even")
+
+    try:
+        data = bytes.fromhex(hex_text)
+    except ValueError:
+        raise ValueError("HEX invalid")
+
+    return data, text, True
 
 # ========================================================
 # ========================================================
@@ -175,4 +201,62 @@ class SerialTxWorker(QtCore.QObject):
 
         print('Sent:', self.data)
         self.finished.emit(bytes_sent, len(self.data), self.text)
+# ========================================================
+
+
+class TxController(QtCore.QObject):
+    started = QtCore.pyqtSignal(bool)
+    finished = QtCore.pyqtSignal(int, int, str)
+    failed = QtCore.pyqtSignal(str, str, str)
+    rejected = QtCore.pyqtSignal(str)
+
+# ========================================================
+    def __init__(self):
+        super().__init__()
+        self.thread = None
+        self.worker = None
+
+# ========================================================
+    def is_busy(self):
+        return self.thread is not None and self.thread.isRunning()
+
+# ========================================================
+    def send(self, ser, text, line_end):
+        if self.is_busy():
+            self.rejected.emit("TX busy")
+            return
+
+        if not text:
+            self.rejected.emit("TX empty")
+            return
+
+        try:
+            data, tx_text, is_hex = parse_tx_input(text, line_end)
+        except ValueError as e:
+            self.rejected.emit(str(e))
+            return
+
+        if not ser.is_open:
+            self.rejected.emit("COM closed")
+            return
+
+        self.thread = QtCore.QThread()
+        self.worker = SerialTxWorker(ser, data, tx_text)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.finished)
+        self.worker.failed.connect(self.failed)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.failed.connect(self.thread.quit)
+        self.thread.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.finished.connect(self.clear_worker)
+        self.started.emit(is_hex)
+        self.thread.start()
+
+# ========================================================
+    def clear_worker(self):
+        self.thread = None
+        self.worker = None
+
 # ========================================================

@@ -9,11 +9,10 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
 from enum import IntEnum
 from serial_tx import (
-    TX_ENCODING,
     TX_WRITE_TIMEOUT,
     TX_LINE_ENDINGS,
     TxHistoryComboBox,
-    SerialTxWorker,
+    TxController,
 )
 
 DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
@@ -268,50 +267,28 @@ class SerialPlot:
         # update timer
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
-        self.tx_thread = None
-        self.tx_worker = None
+
+        # tx controller
+        self.tx_controller = TxController()
+        self.tx_controller.started.connect(self.tx_started)
+        self.tx_controller.finished.connect(self.tx_finished)
+        self.tx_controller.failed.connect(self.tx_failed)
+        self.tx_controller.rejected.connect(self.tx_status.setText)
         self.conncet_toggle(False)
 
+        # debug
         self.validation_sin_phase = 0.0     # only for validation function: update_validation_sin()
-# ========================================================
-    def send(self, data):
-        if self.ser.is_open:
-            bytes_sent = self.ser.write(data)
-            print('Sent:', data)
-            return bytes_sent
-        return 0
+        
 # ========================================================
     def send_tx_input(self):
-        if self.tx_thread is not None and self.tx_thread.isRunning():
-            self.tx_status.setText("TX busy")
-            return
-
         text = self.tx_input.currentText()
-        if not text:
-            self.tx_status.setText("TX empty")
-            return
-
         line_end = TX_LINE_ENDINGS[self.combo_tx_line_end.currentText()]
-        data = (text + line_end).encode(TX_ENCODING)
+        self.tx_controller.send(self.ser, text, line_end)
 
-        if not self.ser.is_open:
-            self.tx_status.setText("COM closed")
-            return
-
+# ========================================================
+    def tx_started(self, is_hex):
         self.btn_send.setEnabled(False)
-        self.tx_status.setText("Sending...")
-        self.tx_thread = QtCore.QThread()
-        self.tx_worker = SerialTxWorker(self.ser, data, text)
-        self.tx_worker.moveToThread(self.tx_thread)
-        self.tx_thread.started.connect(self.tx_worker.run)
-        self.tx_worker.finished.connect(self.tx_finished)
-        self.tx_worker.failed.connect(self.tx_failed)
-        self.tx_worker.finished.connect(self.tx_thread.quit)
-        self.tx_worker.failed.connect(self.tx_thread.quit)
-        self.tx_thread.finished.connect(self.tx_worker.deleteLater)
-        self.tx_thread.finished.connect(self.tx_thread.deleteLater)
-        self.tx_thread.finished.connect(self.clear_tx_worker)
-        self.tx_thread.start()
+        self.tx_status.setText("Sending HEX..." if is_hex else "Sending...")
 
 # ========================================================
     def tx_finished(self, bytes_sent, total_bytes, text):
@@ -328,10 +305,6 @@ class SerialPlot:
         self.tx_status.setText(f"{status}: {text}")
         print(detail)
 
-# ========================================================
-    def clear_tx_worker(self):
-        self.tx_thread = None
-        self.tx_worker = None
 # ========================================================
     def rxHandle_split(self, new_rx):
         packets = (self.residual + new_rx).split(SEP)   # 補回不完整的資料再切割
