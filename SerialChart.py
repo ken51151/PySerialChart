@@ -284,10 +284,31 @@ class SerialPlot:
             buf[:-1] = buf[1:]
             buf[-1] = value
 # ========================================================
+    def _append_curve_values(self, curve_info, values):
+        num_new = len(values)
+        if num_new == 0:
+            return
+
+        buf = curve_info["buf"]
+        idx = curve_info["idx"]
+
+        if num_new >= MAX_POINTS:
+            buf[:] = values[-MAX_POINTS:]
+            curve_info["idx"] = MAX_POINTS
+        elif idx + num_new <= MAX_POINTS:
+            buf[idx : idx + num_new] = values
+            curve_info["idx"] += num_new
+        else:
+            overflow = idx + num_new - MAX_POINTS
+            keep_len = idx - overflow
+            buf[:keep_len] = buf[overflow:idx]
+            buf[keep_len:] = values
+            curve_info["idx"] = MAX_POINTS
+# ========================================================
     def update_line_ascii(self, packets):
         # 多線段 ASCII 模式解析: "<name> = <value>"
         try:
-            updated_names = set()
+            pending_values = {}
             for pak in packets:
                 if b'=' not in pak:     continue        # 辨識是否有 '='
                 
@@ -297,26 +318,28 @@ class SerialPlot:
                 name = parts[0].strip().decode('ascii', errors='ignore')
                 val_str = parts[1].strip()
                 
-                curve_info = self._get_or_create_curve(name)
-                if not curve_info:      continue        # 取得線條資料失敗
-                
                 try:
                     val = self.convert_func(val_str)
                 except:                 continue        # 轉換失敗
 
                 # print("{}={}".format(name, val))
                 
-                # --- 僅更新資料，不觸發繪圖 ---
-                self._append_curve_value(curve_info, val)
-                
-                updated_names.add(name)     # 記錄這個線段有更新需要重繪
+                pending_values.setdefault(name, []).append(val)
+
+            # 同一批資料依線段分組後再批次更新Buffer，避免滿Buffer時逐筆搬移
+            for name, values in pending_values.items():
+                curve_info = self._get_or_create_curve(name)
+                if not curve_info:      continue        # 取得線條資料失敗
+                self._append_curve_values(curve_info, values)
 
             # 尋找資料最長的線段
             if self.curves_data:
                 self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
 
             # 更新繪圖與自動調整畫面
-            for name in updated_names:
+            for name in pending_values:
+                if name not in self.curves_data:
+                    continue
                 info = self.curves_data[name]
                 v_len = self.max_current_idx        # 有效資料點數量 (僅傳有效資料給curve)
                 info["curve"].setData(info["buf"][:v_len], connect="finite")
