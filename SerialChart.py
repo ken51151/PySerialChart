@@ -3,10 +3,13 @@
 import sys
 import serial
 import struct
+import math
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
 from enum import IntEnum
+
+DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
 
 # ===== Serial 設定 =====
 PORT = "COM6"
@@ -111,11 +114,14 @@ class SerialPlot:
         self.btn_connect = QtWidgets.QPushButton("")
         self.btn_connect.setCheckable(True)
         self.btn_connect.toggled.connect(self.conncet_toggle)
+        self.btn_autoY = QtWidgets.QPushButton("&AutoY")
+        self.btn_autoY.clicked.connect(self.auto_y)
         self.btn_clear = QtWidgets.QPushButton("Clear🧹")
         self.btn_clear.clicked.connect(self.clear_data)
         self.controls_layout.addWidget(self.btn_connect)
         self.controls_layout.addWidget(self.btn_cursor)
         self.controls_layout.addWidget(self.btn_rectMode)
+        self.controls_layout.addWidget(self.btn_autoY)
         self.controls_layout.addWidget(self.btn_clear)
         self.controls_layout.addStretch()
 
@@ -124,7 +130,7 @@ class SerialPlot:
         self.win = pg.GraphicsLayoutWidget()
         self.plot = self.win.addPlot()
         self.plot.showGrid(x=True, y=True)
-        self.plot.setYRange(-5000, 5000, padding=0.05)
+        self.plot.setYRange(-2000, 2000, padding=0.05)
         self.plot.setXRange(-5000, 5000, padding=0.05)      # 資料進來後會X軸會自動調整
 
         # 將元件加入layout
@@ -190,6 +196,8 @@ class SerialPlot:
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
         self.conncet_toggle(False)
+
+        self.validation_sin_phase = 0.0     # only for validation function: update_validation_sin()
 # ========================================================
     def send(self, data):
         if self.ser.is_open:
@@ -265,6 +273,16 @@ class SerialPlot:
             
         return self.curves_data[name]
 # ========================================================
+    def _append_curve_value(self, curve_info, value):
+        buf = curve_info["buf"]
+        idx = curve_info["idx"]
+        if idx < MAX_POINTS:
+            buf[idx] = value
+            curve_info["idx"] += 1
+        else:
+            buf[:-1] = buf[1:]
+            buf[-1] = value
+# ========================================================
     def update_line_ascii(self, packets):
         # 多線段 ASCII 模式解析: "<name> = <value>"
         try:
@@ -288,14 +306,7 @@ class SerialPlot:
                 # print("{}={}".format(name, val))
                 
                 # --- 僅更新資料，不觸發繪圖 ---
-                buf = curve_info["buf"]
-                idx = curve_info["idx"]
-                if idx < MAX_POINTS:
-                    buf[idx] = val
-                    curve_info["idx"] += 1
-                else:
-                    buf[:-1] = buf[1:]
-                    buf[-1] = val
+                self._append_curve_value(curve_info, val)
                 
                 updated_names.add(name)     # 記錄這個線段有更新需要重繪
 
@@ -327,7 +338,35 @@ class SerialPlot:
             return
         self.rxHandle(new_rx)
 # ========================================================
+    def update_validation_sin(self):
+        VALIDATION_SIN_POINTS = 5       # 每次Timer更新新增幾個sin點
+        VALIDATION_SIN_STEP = 0.08      # sin相位步進
+        VALIDATION_SIN_AMPLITUDE = 24689
+        VALIDATION_SIN_OFFSET = 7777
+
+        if LINE_MODE == LINE_MODES.SINGLE_LINE:
+            curve_info = self.curves_data.get("default")
+        else:
+            curve_info = self._get_or_create_curve("sin")
+
+        if not curve_info:
+            return
+
+        for _ in range(VALIDATION_SIN_POINTS):
+            value = (math.sin(self.validation_sin_phase) * VALIDATION_SIN_AMPLITUDE) + VALIDATION_SIN_OFFSET
+            self._append_curve_value(curve_info, value)
+            self.validation_sin_phase += VALIDATION_SIN_STEP
+
+        self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
+        v_len = self.max_current_idx
+        curve_info["curve"].setData(curve_info["buf"][:v_len], connect="finite")
+
+        if self.max_current_idx > 0:
+            self.plot.setXRange(0, self.max_current_idx, padding=0.05)
+# ========================================================
     def update(self):
+        if DEBUG_LINE_ENABLE:
+            self.update_validation_sin()        # test line feature
         self.handleRxData()                     # 讀取serial資料並處理
 # ========================================================
     def mouseMoved(self, evt):
@@ -353,7 +392,8 @@ class SerialPlot:
             self.timer.stop()
             self.btn_connect.setStyleSheet("background-color : lightpink")
             self.btn_connect.setText("🔴Stop")
-            self.ser.close()
+            if self.ser.is_open:
+                self.ser.close()
         
     # ----- RectMode
     def rect_mode_toggle(self, checked):
@@ -376,6 +416,42 @@ class SerialPlot:
         if self.mouse_proxy is not None:
             self.mouse_proxy.disconnect()   # 斷開訊號
             self.mouse_proxy = None         # 清空物件，停止監聽
+    # ----- Auto Y
+    def auto_y(self):
+        y_range = self._get_data_y_range()
+        if y_range is None:
+            return            
+        self.plot.setYRange(y_range[0], y_range[1], padding=0.05)
+
+    def _get_data_y_range(self):
+        if not self.curves_data:
+            return None
+
+        y_min = None
+        y_max = None
+        for info in self.curves_data.values():
+            idx = min(info["idx"], MAX_POINTS)
+            if idx <= 0:
+                continue
+
+            values = info["buf"][:idx]
+            values = values[np.isfinite(values)]
+            if not values.size:
+                continue
+
+            curve_min = float(np.min(values))
+            curve_max = float(np.max(values))
+            y_min = curve_min if y_min is None else min(y_min, curve_min)
+            y_max = curve_max if y_max is None else max(y_max, curve_max)
+
+        if y_min is None or y_max is None:
+            return None
+
+        if y_min == y_max:
+            margin = max(abs(y_min) * 0.05, 1.0)
+            return y_min - margin, y_max + margin
+
+        return y_min, y_max
     # ----- Clear
     def clear_data(self):
         self.residual = b""
