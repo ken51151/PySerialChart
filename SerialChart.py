@@ -75,6 +75,14 @@ LEN_END = 5                 # 僅在LENGTH模式下有效
 # @@@@@ 通用設定
 VAL_OFFSET = 0              # 數值分段後的固定位移, 除了MULTI_LINE_ASCII以外的所有模式都會受影響, 不會檢查是否溢出
 SEP = CUSTOM_END.encode()   # 預先計算分隔符避免即時運算的花費
+TX_ENCODING = 'utf-8'
+TX_LINE_ENDINGS = {
+    'None': '',
+    'LF': '\n',
+    'CR': '\r',
+    'CRLF': '\r\n',
+}
+TX_HISTORY_LIMIT = 50
 
 # --------------------------------------------------------
 # table for value mode
@@ -98,6 +106,136 @@ VALUE_CONFIG_TABLE = {
     VALUE_MODES.BIN_FLOAT:  ('BIN', '<f',  4),
     VALUE_MODES.BIN_DOUBLE: ('BIN', '<d',  8),
 }
+# ========================================================
+class TxLineEdit(QtWidgets.QLineEdit):
+    def __init__(self, history_combo):
+        super().__init__()
+        self.history_combo = history_combo
+
+    def event(self, event):
+        if event.type() == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Tab:
+            self.history_combo.complete_from_history()
+            return True
+        return super().event(event)
+
+    def focusNextPrevChild(self, next):
+        if next:
+            self.history_combo.complete_from_history()
+            return True
+        return super().focusNextPrevChild(next)
+
+# ========================================================
+class TxHistoryComboBox(QtWidgets.QComboBox):
+    def __init__(self):
+        super().__init__()
+        self.setEditable(True)
+        self.setLineEdit(TxLineEdit(self))
+        self.setCompleter(None)
+        self.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.setMaxCount(TX_HISTORY_LIMIT)
+        self.setPlaceholderText("Type text and press Enter to send")
+        self.history_index = -1
+        self.lineEdit().installEventFilter(self)
+        self.lineEdit().textEdited.connect(self.reset_history_browse)
+
+    def reset_history_browse(self):
+        self.history_index = -1
+
+    def eventFilter(self, watched, event):
+        if watched == self.lineEdit() and event.type() == QtCore.QEvent.KeyPress:
+            return self.handle_tx_key(event)
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        if self.handle_tx_key(event):
+            return
+        super().keyPressEvent(event)
+
+    def focusNextPrevChild(self, next):
+        if next and self.lineEdit().hasFocus():
+            self.complete_from_history()
+            return True
+        return super().focusNextPrevChild(next)
+
+    def handle_tx_key(self, event):
+        if event.key() == QtCore.Qt.Key_Up:
+            self.select_history(1)
+            return True
+        if event.key() == QtCore.Qt.Key_Down:
+            self.select_history(-1)
+            return True
+        if event.key() == QtCore.Qt.Key_Tab:
+            self.complete_from_history()
+            return True
+        return False
+
+    def complete_from_history(self):
+        text = self.currentText()
+        if not text:
+            if self.count() > 0:
+                self.showPopup()
+            return
+
+        matches = [
+            self.itemText(i)
+            for i in range(self.count())
+            if self.itemText(i).startswith(text)
+        ]
+
+        if not matches:
+            return
+
+        if len(matches) == 1:
+            completion = matches[0]
+        else:
+            completion = self.common_prefix(matches)
+            self.showPopup()
+
+        if len(completion) > len(text):
+            self.setEditText(completion)
+            self.lineEdit().setSelection(len(text), len(completion) - len(text))
+        self.reset_history_browse()
+
+    def common_prefix(self, texts):
+        prefix = texts[0]
+        for text in texts[1:]:
+            while not text.startswith(prefix):
+                prefix = prefix[:-1]
+                if not prefix:
+                    return ""
+        return prefix
+
+    def select_history(self, step):
+        if self.count() == 0:
+            return
+
+        if step > 0:
+            self.history_index = min(self.history_index + 1, self.count() - 1)
+            self.setCurrentIndex(self.history_index)
+        else:
+            self.history_index -= 1
+            if self.history_index < 0:
+                self.history_index = -1
+                self.setCurrentIndex(-1)
+                self.setEditText("")
+            else:
+                self.setCurrentIndex(self.history_index)
+
+        self.lineEdit().selectAll()
+
+    def remember(self, text):
+        if not text:
+            return
+
+        index = self.findText(text)
+        if index >= 0:
+            self.removeItem(index)
+
+        self.insertItem(0, text)
+        self.setCurrentIndex(-1)
+        self.setEditText("")
+        self.reset_history_browse()
+
 # ========================================================
 class SerialPlot:
     def __init__(self):
@@ -142,6 +280,27 @@ class SerialPlot:
         self.controls_layout.addWidget(self.btn_clear)
         self.controls_layout.addStretch()
 
+        # 傳送控制區
+        self.tx_layout = QtWidgets.QHBoxLayout()
+        self.tx_label = QtWidgets.QLabel("TX:")
+        self.tx_input = TxHistoryComboBox()
+        self.tx_input.setFixedWidth(260)
+        self.tx_input.lineEdit().returnPressed.connect(self.send_tx_input)
+        self.combo_tx_line_end = QtWidgets.QComboBox()
+        self.combo_tx_line_end.addItems(TX_LINE_ENDINGS.keys())
+        self.combo_tx_line_end.setCurrentText('LF')
+        self.combo_tx_line_end.setFixedWidth(70)
+        self.btn_send = QtWidgets.QPushButton("&Send")
+        self.btn_send.setFixedWidth(45)
+        self.btn_send.clicked.connect(self.send_tx_input)
+        self.tx_status = QtWidgets.QLabel("")
+        self.tx_layout.addWidget(self.tx_label)
+        self.tx_layout.addWidget(self.tx_input)
+        self.tx_layout.addWidget(self.combo_tx_line_end)
+        self.tx_layout.addWidget(self.btn_send)
+        self.tx_layout.addWidget(self.tx_status)
+        self.tx_layout.addStretch()
+
         # 曲線圖
         self.residual = b""                     # 儲存末端的不完整資料
         self.win = pg.GraphicsLayoutWidget()
@@ -152,6 +311,7 @@ class SerialPlot:
 
         # 將元件加入layout
         self.layout.addLayout(self.controls_layout)
+        self.layout.addLayout(self.tx_layout)
         self.layout.addWidget(self.win)
 
         # 輔助線
@@ -219,6 +379,25 @@ class SerialPlot:
     def send(self, data):
         if self.ser.is_open:
             self.ser.write(data)
+# ========================================================
+    def send_tx_input(self):
+        text = self.tx_input.currentText()
+        line_end = TX_LINE_ENDINGS[self.combo_tx_line_end.currentText()]
+        data = (text + line_end).encode(TX_ENCODING)
+
+        if not self.ser.is_open:
+            self.tx_status.setText("COM closed")
+            return
+
+        # try:
+        #     self.send(data)
+        # except serial.SerialException as e:
+        #     self.tx_status.setText("TX failed")
+        #     print(f"Serial TX error: {e}")
+        #     return
+
+        self.tx_status.setText(f"Sent {len(data)} bytes")
+        self.tx_input.remember(text)
 # ========================================================
     def rxHandle_split(self, new_rx):
         packets = (self.residual + new_rx).split(SEP)   # 補回不完整的資料再切割
@@ -428,12 +607,20 @@ class SerialPlot:
             self.timer.start(UPDATE_INTERVAL)
             self.ser.open()
             self.ser.reset_input_buffer()
+            self.tx_input.setEnabled(True)
+            self.combo_tx_line_end.setEnabled(True)
+            self.btn_send.setEnabled(True)
+            self.tx_status.setText("")
         else:
             self.timer.stop()
             self.btn_connect.setStyleSheet("background-color : lightpink")
             self.btn_connect.setText("🔴Stop")
             if self.ser.is_open:
                 self.ser.close()
+            self.tx_input.setEnabled(False)
+            self.combo_tx_line_end.setEnabled(False)
+            self.btn_send.setEnabled(False)
+            self.tx_status.setText("COM closed")
         
     # ----- RectMode
     def rect_mode_toggle(self, checked):
