@@ -17,6 +17,7 @@ BAUD = 115200
 
 # ===== 圖表/接收模式設定 =====
 MAX_POINTS = 50000              # curve ring buffer size
+MAX_LINES = 10                  # max curve (only multi line mode)
 UPDATE_INTERVAL = 30            # update interval [ms]
 
 # @@@@@ 資料分段方式, 特定資料 or 固定長度
@@ -260,7 +261,7 @@ class SerialPlot:
     def _get_or_create_curve(self, name):
         # 根據名稱取得線段資訊，若不存在則動態建立 (最多10條)
         if name not in self.curves_data:
-            if len(self.curves_data) >= 10:
+            if len(self.curves_data) >= MAX_LINES:
                 return None # 超過數量限制不處理
             
             # 建立新的線段與 Buffer
