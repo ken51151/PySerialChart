@@ -19,6 +19,7 @@ BAUD = 115200
 MAX_POINTS = 50000              # curve ring buffer size
 MAX_LINES = 10                  # max curve (only multi line mode)
 UPDATE_INTERVAL = 30            # update interval [ms]
+X_FOLLOW_WIDTH_DEFAULT = 2000   # default X width while following latest data
 
 # @@@@@ 資料分段方式, 特定資料 or 固定長度
 class SEP_MODES(IntEnum):
@@ -115,14 +116,26 @@ class SerialPlot:
         self.btn_connect = QtWidgets.QPushButton("")
         self.btn_connect.setCheckable(True)
         self.btn_connect.toggled.connect(self.conncet_toggle)
-        self.btn_autoY = QtWidgets.QPushButton("&AutoY")
+        self.btn_autoY = QtWidgets.QPushButton("Auto&Y")
         self.btn_autoY.clicked.connect(self.auto_y)
+        self.btn_followX = QtWidgets.QCheckBox("Follow&X")
+        self.btn_followX.setChecked(True)
+        self.btn_followX.toggled.connect(self.follow_x_toggle)
+        self.spin_x_width = QtWidgets.QSpinBox()
+        self.spin_x_width.setRange(1, MAX_POINTS)
+        self.spin_x_width.setValue(X_FOLLOW_WIDTH_DEFAULT)
+        self.spin_x_width.setSuffix(" pts")
+        self.spin_x_width.setFixedWidth(100)
+        self.spin_x_width.setSingleStep(100)
+        self.spin_x_width.valueChanged.connect(self.update_x_range)
         self.btn_clear = QtWidgets.QPushButton("Clear🧹")
         self.btn_clear.clicked.connect(self.clear_data)
         self.controls_layout.addWidget(self.btn_connect)
         self.controls_layout.addWidget(self.btn_cursor)
         self.controls_layout.addWidget(self.btn_rectMode)
         self.controls_layout.addWidget(self.btn_autoY)
+        self.controls_layout.addWidget(self.btn_followX)
+        self.controls_layout.addWidget(self.spin_x_width)
         self.controls_layout.addWidget(self.btn_clear)
         self.controls_layout.addStretch()
 
@@ -132,7 +145,7 @@ class SerialPlot:
         self.plot = self.win.addPlot()
         self.plot.showGrid(x=True, y=True)
         self.plot.setYRange(-2000, 2000, padding=0.05)
-        self.plot.setXRange(-5000, 5000, padding=0.05)      # 資料進來後會X軸會自動調整
+        self.plot.setXRange(0, X_FOLLOW_WIDTH_DEFAULT, padding=0)
 
         # 將元件加入layout
         self.layout.addLayout(self.controls_layout)
@@ -160,7 +173,7 @@ class SerialPlot:
         elif SEP_MODE == SEP_MODES.LENGTH:              self.rxHandle = self.rxHandle_length    ; info += "固定長度分段模式"
         else:                                           print('ERROR, invalid SEP_MODE!!!')     ; info += "!!! 模式錯誤 !!!"
 
-        self.max_curves_idx = 0
+        self.max_current_idx = 0
         self.curves_data = {}   # 字典管理多條線段： { "name": {"buf": array, "idx": 0, "curve": pg_object} }
         if   LINE_MODE == LINE_MODES.SINGLE_LINE:
             info += ", 單線段模式"
@@ -253,7 +266,7 @@ class SerialPlot:
             v_len = self.max_current_idx        # 有效資料點數量 (僅傳有效資料給curve)
             curve_info["curve"].setData(buf[:v_len], connect="finite")
             # curve_info["curve"].setData(buf[::2], connect="finite")     # 更新curve, 2點取1點, 當資料過大時可考慮
-            self.plot.setXRange(0, self.max_current_idx, padding=0.05)
+            self.update_x_range()
 
         except ValueError as e:
             print(f"Data conversion error: {e}")
@@ -346,7 +359,7 @@ class SerialPlot:
             
             # 調整 X 軸範圍 (從 0 到最長點)
             if self.max_current_idx > 0:
-                self.plot.setXRange(0, self.max_current_idx, padding=0.05)
+                self.update_x_range()
 
         except Exception as e:
             print(f"Multi-line process error: {e}")
@@ -386,7 +399,7 @@ class SerialPlot:
         curve_info["curve"].setData(curve_info["buf"][:v_len], connect="finite")
 
         if self.max_current_idx > 0:
-            self.plot.setXRange(0, self.max_current_idx, padding=0.05)
+            self.update_x_range()
 # ========================================================
     def update(self):
         if DEBUG_LINE_ENABLE:
@@ -423,6 +436,19 @@ class SerialPlot:
     def rect_mode_toggle(self, checked):
         if checked:     self.plot.vb.setMouseMode(pg.ViewBox.RectMode)
         else:           self.plot.vb.setMouseMode(pg.ViewBox.PanMode)
+    # ----- Follow X
+    def follow_x_toggle(self, checked):
+        self.spin_x_width.setEnabled(checked)
+        if checked:
+            self.update_x_range()
+    def update_x_range(self):
+        if not self.btn_followX.isChecked():
+            return
+
+        x_width = self.spin_x_width.value()
+        x_end = max(self.max_current_idx, x_width)
+        x_start = x_end - x_width
+        self.plot.setXRange(x_start, x_end, padding=0)
     # ----- Cursor
     def cursor_toggle(self, checked):
         if checked:     self.cursor_show()
@@ -487,7 +513,7 @@ class SerialPlot:
             info["idx"] = 0
             info["curve"].setData(info["buf"])
 
-        self.plot.setXRange(0, MAX_POINTS, padding=0)
+        self.update_x_range()
 # ========================================================
     def run(self):
         self.main_win.show()
