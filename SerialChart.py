@@ -8,6 +8,13 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
 from enum import IntEnum
+from serial_tx import (
+    TX_ENCODING,
+    TX_WRITE_TIMEOUT,
+    TX_LINE_ENDINGS,
+    TxHistoryComboBox,
+    SerialTxWorker,
+)
 
 DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
 WINDOWS_TITLE = 'SerialChart'
@@ -77,16 +84,6 @@ VAL_OFFSET = 0              # 數值分段後的固定位移, 除了MULTI_LINE_A
 SEP = CUSTOM_END.encode()   # 預先計算分隔符避免即時運算的花費
 
 
-# @@@@@ Tx setting
-TX_ENCODING = 'utf-8'
-TX_LINE_ENDINGS = {
-    'None': '',
-    'LF (\\n)': '\n',
-    'CR (\\r)': '\r',
-    'CRLF': '\r\n',
-}
-TX_HISTORY_LIMIT = 50
-
 # @@@@@ UI component
 X_FOLLOW_WIDTH_DEFAULT = 2000   # default X width while following latest data
 UI_FONT_FAMILY = "Microsoft JhengHei UI"
@@ -114,136 +111,6 @@ VALUE_CONFIG_TABLE = {
     VALUE_MODES.BIN_FLOAT:  ('BIN', '<f',  4),
     VALUE_MODES.BIN_DOUBLE: ('BIN', '<d',  8),
 }
-# ========================================================
-class TxLineEdit(QtWidgets.QLineEdit):
-    def __init__(self, history_combo):
-        super().__init__()
-        self.history_combo = history_combo
-
-    def event(self, event):
-        if event.type() == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Tab:
-            self.history_combo.complete_from_history()
-            return True
-        return super().event(event)
-
-    def focusNextPrevChild(self, next):
-        if next:
-            self.history_combo.complete_from_history()
-            return True
-        return super().focusNextPrevChild(next)
-
-# ========================================================
-class TxHistoryComboBox(QtWidgets.QComboBox):
-    def __init__(self):
-        super().__init__()
-        self.setEditable(True)
-        self.setLineEdit(TxLineEdit(self))
-        self.setCompleter(None)
-        self.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
-        self.setMaxCount(TX_HISTORY_LIMIT)
-        self.setPlaceholderText("Type text and press Enter to send")
-        self.history_index = -1
-        self.lineEdit().installEventFilter(self)
-        self.lineEdit().textEdited.connect(self.reset_history_browse)
-
-    def reset_history_browse(self):
-        self.history_index = -1
-
-    def eventFilter(self, watched, event):
-        if watched == self.lineEdit() and event.type() == QtCore.QEvent.KeyPress:
-            return self.handle_tx_key(event)
-        return super().eventFilter(watched, event)
-
-    def keyPressEvent(self, event):
-        if self.handle_tx_key(event):
-            return
-        super().keyPressEvent(event)
-
-    def focusNextPrevChild(self, next):
-        if next and self.lineEdit().hasFocus():
-            self.complete_from_history()
-            return True
-        return super().focusNextPrevChild(next)
-
-    def handle_tx_key(self, event):
-        if event.key() == QtCore.Qt.Key_Up:
-            self.select_history(1)
-            return True
-        if event.key() == QtCore.Qt.Key_Down:
-            self.select_history(-1)
-            return True
-        if event.key() == QtCore.Qt.Key_Tab:
-            self.complete_from_history()
-            return True
-        return False
-
-    def complete_from_history(self):
-        text = self.currentText()
-        if not text:
-            if self.count() > 0:
-                self.showPopup()
-            return
-
-        matches = [
-            self.itemText(i)
-            for i in range(self.count())
-            if self.itemText(i).startswith(text)
-        ]
-
-        if not matches:
-            return
-
-        if len(matches) == 1:
-            completion = matches[0]
-        else:
-            completion = self.common_prefix(matches)
-            self.showPopup()
-
-        if len(completion) > len(text):
-            self.setEditText(completion)
-            self.lineEdit().setSelection(len(text), len(completion) - len(text))
-        self.reset_history_browse()
-
-    def common_prefix(self, texts):
-        prefix = texts[0]
-        for text in texts[1:]:
-            while not text.startswith(prefix):
-                prefix = prefix[:-1]
-                if not prefix:
-                    return ""
-        return prefix
-
-    def select_history(self, step):
-        if self.count() == 0:
-            return
-
-        if step > 0:
-            self.history_index = min(self.history_index + 1, self.count() - 1)
-            self.setCurrentIndex(self.history_index)
-        else:
-            self.history_index -= 1
-            if self.history_index < 0:
-                self.history_index = -1
-                self.setCurrentIndex(-1)
-                self.setEditText("")
-            else:
-                self.setCurrentIndex(self.history_index)
-
-        self.lineEdit().selectAll()
-
-    def remember(self, text):
-        if not text:
-            return
-
-        index = self.findText(text)
-        if index >= 0:
-            self.removeItem(index)
-
-        self.insertItem(0, text)
-        self.setCurrentIndex(-1)
-        self.setEditText("")
-        self.reset_history_browse()
-
 # ========================================================
 class SerialPlot:
     def __init__(self):
@@ -359,7 +226,7 @@ class SerialPlot:
         print(f"{WINDOWS_TITLE} v{VERSION}")
         info = ""
         offset = VAL_OFFSET
-        self.ser = serial.Serial(baudrate=BAUD, timeout=0.1)
+        self.ser = serial.Serial(baudrate=BAUD, timeout=0.1, write_timeout=TX_WRITE_TIMEOUT)
         self.ser.port = PORT
         if   SEP_MODE == SEP_MODES.CUSTOM_END:          self.rxHandle = self.rxHandle_split     ; info += "特定資料分段模式"
         elif SEP_MODE == SEP_MODES.LENGTH:              self.rxHandle = self.rxHandle_length    ; info += "固定長度分段模式"
@@ -401,16 +268,29 @@ class SerialPlot:
         # update timer
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
+        self.tx_thread = None
+        self.tx_worker = None
         self.conncet_toggle(False)
 
         self.validation_sin_phase = 0.0     # only for validation function: update_validation_sin()
 # ========================================================
     def send(self, data):
         if self.ser.is_open:
-            self.ser.write(data)
+            bytes_sent = self.ser.write(data)
+            print('Sent:', data)
+            return bytes_sent
+        return 0
 # ========================================================
     def send_tx_input(self):
+        if self.tx_thread is not None and self.tx_thread.isRunning():
+            self.tx_status.setText("TX busy")
+            return
+
         text = self.tx_input.currentText()
+        if not text:
+            self.tx_status.setText("TX empty")
+            return
+
         line_end = TX_LINE_ENDINGS[self.combo_tx_line_end.currentText()]
         data = (text + line_end).encode(TX_ENCODING)
 
@@ -418,15 +298,40 @@ class SerialPlot:
             self.tx_status.setText("COM closed")
             return
 
-        # try:
-        #     self.send(data)
-        # except serial.SerialException as e:
-        #     self.tx_status.setText("TX failed")
-        #     print(f"Serial TX error: {e}")
-        #     return
+        self.btn_send.setEnabled(False)
+        self.tx_status.setText("Sending...")
+        self.tx_thread = QtCore.QThread()
+        self.tx_worker = SerialTxWorker(self.ser, data, text)
+        self.tx_worker.moveToThread(self.tx_thread)
+        self.tx_thread.started.connect(self.tx_worker.run)
+        self.tx_worker.finished.connect(self.tx_finished)
+        self.tx_worker.failed.connect(self.tx_failed)
+        self.tx_worker.finished.connect(self.tx_thread.quit)
+        self.tx_worker.failed.connect(self.tx_thread.quit)
+        self.tx_thread.finished.connect(self.tx_worker.deleteLater)
+        self.tx_thread.finished.connect(self.tx_thread.deleteLater)
+        self.tx_thread.finished.connect(self.clear_tx_worker)
+        self.tx_thread.start()
 
-        self.tx_status.setText(f"Sent {len(data)} bytes")
+# ========================================================
+    def tx_finished(self, bytes_sent, total_bytes, text):
+        if self.ser.is_open:
+            self.btn_send.setEnabled(True)
+        status_prefix = "Queued" if TX_WRITE_TIMEOUT == 0 else "Sent"
+        self.tx_status.setText(f"{status_prefix} {bytes_sent}/{total_bytes} bytes")
         self.tx_input.remember(text)
+
+# ========================================================
+    def tx_failed(self, status, detail, text):
+        if self.ser.is_open:
+            self.btn_send.setEnabled(True)
+        self.tx_status.setText(f"{status}: {text}")
+        print(detail)
+
+# ========================================================
+    def clear_tx_worker(self):
+        self.tx_thread = None
+        self.tx_worker = None
 # ========================================================
     def rxHandle_split(self, new_rx):
         packets = (self.residual + new_rx).split(SEP)   # 補回不完整的資料再切割
