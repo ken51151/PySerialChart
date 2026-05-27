@@ -11,6 +11,7 @@ SerialChart is a lightweight Python tool for real-time serial data plotting. It 
 - Up to 10 dynamic curves in multi-line ASCII mode
 - Cursor mode for inspecting X/Y values
 - Manual Y-axis auto-scaling
+- Optional X-axis follow mode with configurable display width
 - Sine-wave validation function for plot testing
 
 ## Requirements
@@ -28,6 +29,7 @@ PORT = "COM6"
 BAUD = 115200
 MAX_POINTS = 50000
 UPDATE_INTERVAL = 30
+X_FOLLOW_WIDTH_DEFAULT = 2000
 ```
 
 Data parsing can be adjusted with:
@@ -77,6 +79,16 @@ self.update_validation_sin()
 
 Comment this line out when validation is not needed.
 
+## Controls
+
+- `Running`: start or stop serial reading
+- `Cursor`: show or hide the X/Y cursor
+- `RectMode`: switch the mouse interaction mode
+- `AutoY`: fit the Y-axis to the current data range
+- `FollowX`: keep the plot following the newest data
+- `X Width`: set the visible X-axis width while `FollowX` is enabled
+- `Clear`: reset all curve data
+
 ## Usage
 
 Run the script:
@@ -86,3 +98,18 @@ python SerialChart.py
 ```
 
 Click `Running` to start reading and plotting data. Use `AutoY` to fit the Y-axis to the current data range.
+
+## Changelog
+
+### 0.2 (2026/05/27)
+
+- Added version constants and versioned window title.
+- Added configurable X-axis follow mode.
+- Optimized multi-line ASCII updates by batching new values per curve before updating buffers.
+- Changed Y-axis auto-scaling to apply once instead of continuously auto-ranging.
+- Added README documentation.
+
+### 0.1
+
+- Initial serial plotting tool.
+- Added COM port reading, packet parsing, single-line mode, multi-line ASCII mode, cursor inspection, and basic plot controls.

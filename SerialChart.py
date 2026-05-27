@@ -10,6 +10,9 @@ from pyqtgraph.Qt import QtWidgets, QtCore
 from enum import IntEnum
 
 DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
+VERSION_MAJOR = 0
+VERSION_MINOR = 0
+VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
 
 # ===== Serial 設定 =====
 PORT = "COM6"
@@ -101,7 +104,7 @@ class SerialPlot:
         # 初始化 Qt Window
         self.app = QtWidgets.QApplication(sys.argv)
         self.main_win = QtWidgets.QMainWindow()
-        self.main_win.setWindowTitle("Serial Data Monitor")
+        self.main_win.setWindowTitle(f"SerialChart v{VERSION}")
         self.main_win.resize(800, 600)
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
@@ -196,7 +199,7 @@ class SerialPlot:
             if type == 'ASCII':
                 if offset == 0:                         self.convert_func = fmt
                 else:                                   self.convert_func = lambda pak, f=fmt, s=size: f(pak[offset:offset + s])
-                info += " + {}, size={}, offset={}, SEP=[{}]".format(type, size, offset, SEP.hex(' '))
+                info += " + {}, size={}, offset={}, SEP=[{}]".format(type, size, offset, SEP.hex(' ').upper())
             else:
                 if offset == 0:                         self.convert_func = lambda pak, f=fmt, s=size: struct.unpack(f, pak[:s])[0]
                 else:                                   self.convert_func = lambda pak, f=fmt, s=size: struct.unpack(f, pak[offset : offset + s])[0]
