@@ -247,6 +247,8 @@ class SerialPlot:
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
+        self.status_bar = QtWidgets.QStatusBar()
+        self.main_win.setStatusBar(self.status_bar)
 
         # 頂部控制區
         self.controls_layout = QtWidgets.QHBoxLayout()
@@ -294,11 +296,13 @@ class SerialPlot:
         self.btn_send.setFixedWidth(45)
         self.btn_send.clicked.connect(self.send_tx_input)
         self.tx_status = QtWidgets.QLabel("")
+        self.com_status_icon = QtWidgets.QLabel("")
+        self.status_bar.addWidget(self.com_status_icon)
+        self.status_bar.addWidget(self.tx_status, 1)
         self.tx_layout.addWidget(self.tx_label)
         self.tx_layout.addWidget(self.tx_input)
         self.tx_layout.addWidget(self.combo_tx_line_end)
         self.tx_layout.addWidget(self.btn_send)
-        self.tx_layout.addWidget(self.tx_status)
         self.tx_layout.addStretch()
 
         # 曲線圖
@@ -610,6 +614,7 @@ class SerialPlot:
             self.tx_input.setEnabled(True)
             self.combo_tx_line_end.setEnabled(True)
             self.btn_send.setEnabled(True)
+            self.com_status_icon.setText("🟢 COM open")
             self.tx_status.setText("")
         else:
             self.timer.stop()
@@ -620,6 +625,7 @@ class SerialPlot:
             self.tx_input.setEnabled(False)
             self.combo_tx_line_end.setEnabled(False)
             self.btn_send.setEnabled(False)
+            self.com_status_icon.setText("🔴 COM closed")
             self.tx_status.setText("COM closed")
         
     # ----- RectMode
