@@ -14,6 +14,7 @@ from serial_tx import (
     TxHistoryComboBox,
     TxController,
 )
+from serial_rx import RxParserConfig, RxPlotParser, SerialRxController
 
 DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
 WINDOWS_TITLE = 'SerialChart'
@@ -187,7 +188,6 @@ class SerialPlot:
         # self.tx_layout.addStretch()       // add stretch in right side
 
         # 曲線圖
-        self.residual = b""                     # 儲存末端的不完整資料
         self.win = pg.GraphicsLayoutWidget()
         self.win.setMinimumHeight(200)
         self.plot = self.win.addPlot()
@@ -227,8 +227,8 @@ class SerialPlot:
         offset = VAL_OFFSET
         self.ser = serial.Serial(baudrate=BAUD, timeout=0.1, write_timeout=TX_WRITE_TIMEOUT)
         self.ser.port = PORT
-        if   SEP_MODE == SEP_MODES.CUSTOM_END:          self.rxHandle = self.rxHandle_split     ; info += "特定資料分段模式"
-        elif SEP_MODE == SEP_MODES.LENGTH:              self.rxHandle = self.rxHandle_length    ; info += "固定長度分段模式"
+        if   SEP_MODE == SEP_MODES.CUSTOM_END:          self.rx_sep_mode = "custom_end"         ; info += "特定資料分段模式"
+        elif SEP_MODE == SEP_MODES.LENGTH:              self.rx_sep_mode = "length"             ; info += "固定長度分段模式"
         else:                                           print('ERROR, invalid SEP_MODE!!!')     ; info += "!!! 模式錯誤 !!!"
 
         self.max_current_idx = 0
@@ -239,34 +239,37 @@ class SerialPlot:
             curve = self.plot.plot(pen=colors[0])
             curve.setData(buf, connect="finite")
             self.curves_data["default"] = {"buf": buf, "idx": 0, "curve": curve}
-            self.update_packets = self.update_line_single
+            self.rx_line_mode = "single"
         elif LINE_MODE == LINE_MODES.MULTI_LINE_ASCII:
             info += ", 多線段ASCII模式"
             # 多線段會動態新增線段
             self.plot.addLegend()   # 多線段模式建議開啟圖例
-            self.update_packets = self.update_line_ascii
+            self.rx_line_mode = "multi_ascii"
         else:
             info += "!!! 線段設定錯誤 !!!"  
             print('ERROR, invalid LINE_MODE!!!')
         
         if VALUE_MODE in VALUE_CONFIG_TABLE:
-            type, fmt, size = VALUE_CONFIG_TABLE[VALUE_MODE]
-            if type == 'ASCII':
-                if offset == 0:                         self.convert_func = fmt
-                else:                                   self.convert_func = lambda pak, f=fmt, s=size: f(pak[offset:offset + s])
-                info += " + {}, size={}, offset={}, SEP=[{}]".format(type, size, offset, SEP.hex(' ').upper())
+            self.rx_value_type, self.rx_value_fmt, self.rx_value_size = VALUE_CONFIG_TABLE[VALUE_MODE]
+            if self.rx_value_type == 'ASCII':
+                info += " + {}, size={}, offset={}, SEP=[{}]".format(self.rx_value_type, self.rx_value_size, offset, SEP.hex(' ').upper())
             else:
-                if offset == 0:                         self.convert_func = lambda pak, f=fmt, s=size: struct.unpack(f, pak[:s])[0]
-                else:                                   self.convert_func = lambda pak, f=fmt, s=size: struct.unpack(f, pak[offset : offset + s])[0]
-                info += " + {}, size={}, offset={}, Length={}".format(type, size, offset, LEN_END)
+                info += " + {}, size={}, offset={}, Length={}".format(self.rx_value_type, self.rx_value_size, offset, LEN_END)
         else:
             print('ERROR, invalid VALUE_MODE!!!')
-            self.convert_func = lambda x: x # 預防性 fallback，避免執行時報錯
+            self.rx_value_type, self.rx_value_fmt, self.rx_value_size = ('ASCII', int, 4)
         print(info)
 
-        # update timer
+        # update timer (validation only; RX uses SerialRxController)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
+
+        # rx controller
+        self.rx_controller = SerialRxController(UPDATE_INTERVAL)
+        # RX thread emits already parsed plot batches; main thread only updates UI/curves.
+        self.rx_controller.plot_batch_ready.connect(self.update_plot_batch)
+        self.rx_controller.raw_received.connect(self.handle_terminal_raw_rx)
+        self.rx_controller.failed.connect(self.rx_failed)
 
         # tx controller
         self.tx_controller = TxController()
@@ -306,54 +309,18 @@ class SerialPlot:
         print(detail)
 
 # ========================================================
-    def rxHandle_split(self, new_rx):
-        packets = (self.residual + new_rx).split(SEP)   # 補回不完整的資料再切割
-        self.residual = packets.pop()                   # 取出最後一項不完整資料, 剩下的都是完整的封包
-
-        if not packets:
-            return
-
-        packets = filter(None, packets)                 # 過濾空封包
-        self.update_packets(packets)
-# ========================================================
-    def rxHandle_length(self, new_rx):
-        N = LEN_END
-        data = self.residual + new_rx
-        num_packets = len(data) // N
-        packets = [data[i*N : (i+1)*N] for i in range(num_packets)]
-        self.residual = data[num_packets * N:]
-
-        if not packets:
-            return
-        
-        self.update_packets(packets)
-# ========================================================
-    def update_line_single(self, packets):
+    def update_line_single_values(self, values):
         # 單線模式直接對應到 "default" 線段
         curve_info = self.curves_data.get("default")
 
         try:
-            new_values = [self.convert_func(pak) for pak in packets]
-            num_new = len(new_values)
-
-            if num_new == 0: 
+            if not values:
                 return
-            
-            buf = curve_info["buf"]
-            idx = curve_info["idx"]
 
-            # --- 更新 NumPy Buffer ---
-            if idx + num_new <= MAX_POINTS:    # Buffer 還沒填滿，從左往右填充
-                buf[idx : idx + num_new] = new_values
-                curve_info["idx"] += num_new
-                self.max_current_idx = idx + num_new
-            else:                              # 剛好填滿或已經溢出, 切換到滾動模式
-                buf[:-num_new] = buf[num_new:]    # 將舊資料左移
-                buf[-num_new:] = new_values       # 新資料填入最末端
-                curve_info["idx"] = MAX_POINTS
-                self.max_current_idx = MAX_POINTS
+            self._append_curve_values(curve_info, values)
+            self.max_current_idx = curve_info["idx"]
             v_len = self.max_current_idx        # 有效資料點數量 (僅傳有效資料給curve)
-            curve_info["curve"].setData(buf[:v_len], connect="finite")
+            curve_info["curve"].setData(curve_info["buf"][:v_len], connect="finite")
             # curve_info["curve"].setData(buf[::2], connect="finite")     # 更新curve, 2點取1點, 當資料過大時可考慮
             self.update_x_range()
 
@@ -407,29 +374,10 @@ class SerialPlot:
             buf[keep_len:] = values
             curve_info["idx"] = MAX_POINTS
 # ========================================================
-    def update_line_ascii(self, packets):
-        # 多線段 ASCII 模式解析: "<name> = <value>"
+    def update_line_ascii_series(self, series):
         try:
-            pending_values = {}
-            for pak in packets:
-                if b'=' not in pak:     continue        # 辨識是否有 '='
-                
-                parts = pak.split(b'=')
-                if len(parts) != 2:     continue        # 拆分左值與右值失敗
-                
-                name = parts[0].strip().decode('ascii', errors='ignore')
-                val_str = parts[1].strip()
-                
-                try:
-                    val = self.convert_func(val_str)
-                except:                 continue        # 轉換失敗
-
-                # print("{}={}".format(name, val))
-                
-                pending_values.setdefault(name, []).append(val)
-
             # 同一批資料依線段分組後再批次更新Buffer，避免滿Buffer時逐筆搬移
-            for name, values in pending_values.items():
+            for name, values in series.items():
                 curve_info = self._get_or_create_curve(name)
                 if not curve_info:      continue        # 取得線條資料失敗
                 self._append_curve_values(curve_info, values)
@@ -439,7 +387,7 @@ class SerialPlot:
                 self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
 
             # 更新繪圖與自動調整畫面
-            for name in pending_values:
+            for name in series:
                 if name not in self.curves_data:
                     continue
                 info = self.curves_data[name]
@@ -453,16 +401,25 @@ class SerialPlot:
         except Exception as e:
             print(f"Multi-line process error: {e}")
 # ========================================================
-    def handleRxData(self):
-        try:
-            new_rx = self.ser.read_all()        # 讀取目前所有可用 bytes
-        except:
-            self.conncet_toggle(False)          # read_all失敗, turn off COM
-            return
-        
-        if not new_rx:
-            return
-        self.rxHandle(new_rx)
+    def update_plot_batch(self, batch):
+        if batch["mode"] == "single":
+            self.update_line_single_values(batch["values"])
+        elif batch["mode"] == "multi_ascii":
+            self.update_line_ascii_series(batch["series"])
+
+# ========================================================
+    def handle_terminal_raw_rx(self, raw_rx):
+        # Reserved for the future terminal window raw-data pipeline.
+        pass
+
+# ========================================================
+    def rx_failed(self, message):
+        print(message)
+        self.tx_status.setText("RX failed")
+        if self.btn_connect.isChecked():
+            self.btn_connect.setChecked(False)
+        else:
+            self.conncet_toggle(False)
 # ========================================================
     def update_validation_sin(self):
         VALIDATION_SIN_POINTS = 5       # 每次Timer更新新增幾個sin點
@@ -493,7 +450,6 @@ class SerialPlot:
     def update(self):
         if DEBUG_LINE_ENABLE:
             self.update_validation_sin()        # test line feature
-        self.handleRxData()                     # 讀取serial資料並處理
 # ========================================================
     def mouseMoved(self, evt):
         pos = evt[0]        # 滑鼠在 Scene 中的位置
@@ -511,9 +467,11 @@ class SerialPlot:
             self.btn_connect.setStyleSheet("background-color : palegreen")
             self.btn_connect.setText("🟢 Running")
             self.clear_data()
-            self.timer.start(UPDATE_INTERVAL)
+            if DEBUG_LINE_ENABLE:
+                self.timer.start(UPDATE_INTERVAL)
             self.ser.open()
             self.ser.reset_input_buffer()
+            self.rx_controller.start(self.ser, self.create_rx_plot_parser())
             self.tx_input.setEnabled(True)
             self.combo_tx_line_end.setEnabled(True)
             self.btn_send.setEnabled(True)
@@ -523,6 +481,7 @@ class SerialPlot:
             self.timer.stop()
             self.btn_connect.setStyleSheet("background-color : lightpink")
             self.btn_connect.setText("🔴 Stop")
+            self.rx_controller.stop()
             if self.ser.is_open:
                 self.ser.close()
             self.tx_input.setEnabled(False)
@@ -531,6 +490,34 @@ class SerialPlot:
             self.com_status_icon.setText("🔴")
             self.tx_status.setText("COM closed")
         
+# ========================================================
+    def create_rx_plot_parser(self):
+        config = self.create_rx_parser_config()
+        return RxPlotParser(
+            config.sep_mode,
+            config.line_mode,
+            config.value_type,
+            config.value_fmt,
+            config.value_size,
+            config.sep,
+            config.len_end,
+            config.offset,
+        )
+
+# ========================================================
+    def create_rx_parser_config(self):
+        # Future settings UI can create the same snapshot and pass it to rx_controller.apply_plot_config().
+        return RxParserConfig(
+            self.rx_sep_mode,
+            self.rx_line_mode,
+            self.rx_value_type,
+            self.rx_value_fmt,
+            self.rx_value_size,
+            SEP,
+            LEN_END,
+            VAL_OFFSET,
+        )
+
     # ----- RectMode
     def rect_mode_toggle(self, checked):
         if checked:     self.plot.vb.setMouseMode(pg.ViewBox.RectMode)
@@ -603,8 +590,9 @@ class SerialPlot:
         return y_min, y_max
     # ----- Clear
     def clear_data(self):
-        self.residual = b""
         self.max_current_idx = 0
+        # Clear parser residual as well as visible curve buffers.
+        self.rx_controller.reset_plot_parser()
 
         # 將已建立的線段進行重設
         for name, info in self.curves_data.items():
