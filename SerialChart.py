@@ -9,8 +9,9 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
 from enum import IntEnum
 from serial_tx import (
+    DEFAULT_TX_CONFIG,
     TX_WRITE_TIMEOUT,
-    TX_LINE_ENDINGS,
+    TxConfig,
     TxHistoryComboBox,
     TxController,
 )
@@ -129,6 +130,7 @@ class SerialPlot:
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
+        self.tx_config = self.create_tx_config()
    
 
         # 頂部控制區
@@ -176,7 +178,7 @@ class SerialPlot:
         self.tx_input.lineEdit().returnPressed.connect(self.send_tx_input)
         self.combo_tx_line_end = QtWidgets.QComboBox()
         self.combo_tx_line_end.setFixedSize(90, 30)
-        self.combo_tx_line_end.addItems(TX_LINE_ENDINGS.keys())
+        self.combo_tx_line_end.addItems(self.tx_config.line_endings.keys())
         self.combo_tx_line_end.setCurrentText('LF (\\n)')
         self.btn_send = QtWidgets.QPushButton("&Send")
         self.btn_send.setFixedSize(80, 30)
@@ -272,7 +274,7 @@ class SerialPlot:
         self.rx_controller.failed.connect(self.rx_failed)
 
         # tx controller
-        self.tx_controller = TxController()
+        self.tx_controller = TxController(self.tx_config)
         self.tx_controller.started.connect(self.tx_started)
         self.tx_controller.finished.connect(self.tx_finished)
         self.tx_controller.failed.connect(self.tx_failed)
@@ -281,12 +283,34 @@ class SerialPlot:
 
         # debug
         self.validation_sin_phase = 0.0     # only for validation function: update_validation_sin()
-        
+
+# ========================================================
+# ========================================================        
 # ========================================================
     def send_tx_input(self):
         text = self.tx_input.currentText()
-        line_end = TX_LINE_ENDINGS[self.combo_tx_line_end.currentText()]
+        line_end = self.tx_config.line_endings[self.combo_tx_line_end.currentText()]
         self.tx_controller.send(self.ser, text, line_end)
+
+# ========================================================
+    def create_tx_config(self):
+        return TxConfig(
+            line_endings=DEFAULT_TX_CONFIG.line_endings,
+            prefix_enabled=DEFAULT_TX_CONFIG.prefix_enabled,
+        )
+
+# ========================================================
+    def apply_tx_config(self, config):
+        self.tx_config = config
+        current_line_end = self.combo_tx_line_end.currentText()
+        self.combo_tx_line_end.clear()
+        self.combo_tx_line_end.addItems(config.line_endings.keys())
+        if current_line_end in config.line_endings:
+            self.combo_tx_line_end.setCurrentText(current_line_end)
+        elif config.line_endings:
+            self.combo_tx_line_end.setCurrentIndex(0)
+
+        self.tx_controller.apply_config(config)
 
 # ========================================================
     def tx_started(self, is_hex):
@@ -308,6 +332,8 @@ class SerialPlot:
         self.tx_status.setText(f"{status}: {text}")
         print(detail)
 
+# ========================================================
+# ========================================================
 # ========================================================
     def update_line_single_values(self, values):
         # 單線模式直接對應到 "default" 線段
@@ -406,12 +432,41 @@ class SerialPlot:
             self.update_line_single_values(batch["values"])
         elif batch["mode"] == "multi_ascii":
             self.update_line_ascii_series(batch["series"])
-
+# ========================================================
+# ========================================================
 # ========================================================
     def handle_terminal_raw_rx(self, raw_rx):
         # Reserved for the future terminal window raw-data pipeline.
         pass
 
+# ========================================================
+# ========================================================
+# ========================================================
+    def create_rx_plot_parser(self):
+        config = self.create_rx_parser_config()
+        return RxPlotParser(
+            config.sep_mode,
+            config.line_mode,
+            config.value_type,
+            config.value_fmt,
+            config.value_size,
+            config.sep,
+            config.len_end,
+            config.offset,
+        )
+# ========================================================
+    def create_rx_parser_config(self):
+        # Future settings UI can create the same snapshot and pass it to rx_controller.apply_plot_config().
+        return RxParserConfig(
+            self.rx_sep_mode,
+            self.rx_line_mode,
+            self.rx_value_type,
+            self.rx_value_fmt,
+            self.rx_value_size,
+            SEP,
+            LEN_END,
+            VAL_OFFSET,
+        )
 # ========================================================
     def rx_failed(self, message):
         print(message)
@@ -420,6 +475,8 @@ class SerialPlot:
             self.btn_connect.setChecked(False)
         else:
             self.conncet_toggle(False)
+# ========================================================
+# ========================================================
 # ========================================================
     def update_validation_sin(self):
         VALIDATION_SIN_POINTS = 5       # 每次Timer更新新增幾個sin點
@@ -489,34 +546,7 @@ class SerialPlot:
             self.btn_send.setEnabled(False)
             self.com_status_icon.setText("🔴")
             self.tx_status.setText("COM closed")
-        
-# ========================================================
-    def create_rx_plot_parser(self):
-        config = self.create_rx_parser_config()
-        return RxPlotParser(
-            config.sep_mode,
-            config.line_mode,
-            config.value_type,
-            config.value_fmt,
-            config.value_size,
-            config.sep,
-            config.len_end,
-            config.offset,
-        )
 
-# ========================================================
-    def create_rx_parser_config(self):
-        # Future settings UI can create the same snapshot and pass it to rx_controller.apply_plot_config().
-        return RxParserConfig(
-            self.rx_sep_mode,
-            self.rx_line_mode,
-            self.rx_value_type,
-            self.rx_value_fmt,
-            self.rx_value_size,
-            SEP,
-            LEN_END,
-            VAL_OFFSET,
-        )
 
     # ----- RectMode
     def rect_mode_toggle(self, checked):
