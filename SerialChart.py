@@ -1,13 +1,14 @@
 ﻿# pip install PyQt5 pyqtgraph pyserial
 
 import sys
-import serial
 import struct
 import math
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore
 from enum import IntEnum
+from serial_comm import SerialCommConfig, apply_serial_config, create_serial_port
+from port_settings_dialog import PortSettingsDialog
 from serial_tx import (
     DEFAULT_TX_CONFIG,
     TX_WRITE_TIMEOUT,
@@ -130,6 +131,7 @@ class SerialPlot:
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
+        self.comm_config = self.create_comm_config()
         self.tx_config = self.create_tx_config()
    
 
@@ -143,6 +145,9 @@ class SerialPlot:
         self.btn_connect.setFixedSize(100, 30)
         self.btn_connect.setCheckable(True)
         self.btn_connect.toggled.connect(self.conncet_toggle)
+        self.btn_config = QtWidgets.QPushButton("&Config")
+        self.btn_config.setFixedSize(80, 30)
+        self.btn_config.clicked.connect(self.open_port_settings_dialog)
         self.btn_autoY = QtWidgets.QPushButton("Auto&Y")
         self.btn_autoY.setFixedSize(80, 30)
         self.btn_autoY.clicked.connect(self.auto_y)
@@ -160,6 +165,7 @@ class SerialPlot:
         self.btn_clear.setFixedSize(100, 30)
         self.btn_clear.clicked.connect(self.clear_data)
         self.controls_layout.addWidget(self.btn_connect)
+        self.controls_layout.addWidget(self.btn_config)
         self.controls_layout.addWidget(self.btn_cursor)
         self.controls_layout.addWidget(self.btn_rectMode)
         self.controls_layout.addWidget(self.btn_autoY)
@@ -227,8 +233,7 @@ class SerialPlot:
         print(f"{WINDOWS_TITLE} v{VERSION}")
         info = ""
         offset = VAL_OFFSET
-        self.ser = serial.Serial(baudrate=BAUD, timeout=0.1, write_timeout=TX_WRITE_TIMEOUT)
-        self.ser.port = PORT
+        self.ser = create_serial_port(self.comm_config)
         if   SEP_MODE == SEP_MODES.CUSTOM_END:          self.rx_sep_mode = "custom_end"         ; info += "特定資料分段模式"
         elif SEP_MODE == SEP_MODES.LENGTH:              self.rx_sep_mode = "length"             ; info += "固定長度分段模式"
         else:                                           print('ERROR, invalid SEP_MODE!!!')     ; info += "!!! 模式錯誤 !!!"
@@ -286,6 +291,42 @@ class SerialPlot:
 
 # ========================================================
 # ========================================================        
+# ========================================================
+    def create_comm_config(self):
+        return SerialCommConfig(
+            port=PORT,
+            baudrate=BAUD,
+            timeout=0.1,
+            write_timeout=TX_WRITE_TIMEOUT,
+        )
+
+# ========================================================
+    def apply_comm_config(self, config):
+        if self.ser.is_open:
+            self.tx_status.setText("Close COM before changing settings")
+            return False
+
+        self.comm_config = config
+        try:
+            apply_serial_config(self.ser, config)
+        except Exception as e:
+            print(f"COM config error: {e}")
+            self.tx_status.setText("COM config error")
+            return False
+
+        self.tx_status.setText(f"{config.port}, {config.baudrate}")
+        return True
+
+# ========================================================
+    def open_port_settings_dialog(self):
+        if self.ser.is_open:
+            self.tx_status.setText("Close COM before changing settings")
+            return
+
+        dialog = PortSettingsDialog(self.comm_config, self.main_win)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_comm_config(dialog.get_config())
+
 # ========================================================
     def send_tx_input(self):
         text = self.tx_input.currentText()
@@ -523,9 +564,11 @@ class SerialPlot:
         if checked:
             self.btn_connect.setStyleSheet("background-color : palegreen")
             self.btn_connect.setText("🟢 Running")
+            self.btn_config.setEnabled(False)
             self.clear_data()
             if DEBUG_LINE_ENABLE:
                 self.timer.start(UPDATE_INTERVAL)
+            apply_serial_config(self.ser, self.comm_config)
             self.ser.open()
             self.ser.reset_input_buffer()
             self.rx_controller.start(self.ser, self.create_rx_plot_parser())
@@ -544,6 +587,7 @@ class SerialPlot:
             self.tx_input.setEnabled(False)
             self.combo_tx_line_end.setEnabled(False)
             self.btn_send.setEnabled(False)
+            self.btn_config.setEnabled(True)
             self.com_status_icon.setText("🔴")
             self.tx_status.setText("COM closed")
 
