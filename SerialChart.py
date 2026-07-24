@@ -1,11 +1,12 @@
 ﻿# pip install PyQt5 pyqtgraph pyserial
 
 import sys
+from pathlib import Path
 import struct
 import math
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtWidgets, QtCore
+from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 from enum import IntEnum
 from serial_comm import SerialCommConfig, apply_serial_config, create_serial_port
 from port_settings_dialog import PortSettingsDialog
@@ -23,6 +24,7 @@ WINDOWS_TITLE = 'SerialChart'
 VERSION_MAJOR = 0
 VERSION_MINOR = 0
 VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
+ICON_DIR = Path(__file__).resolve().parent / "assets" / "icons"
 
 # ===== Serial 設定 =====
 PORT = "COM6"
@@ -134,20 +136,12 @@ class SerialPlot:
         self.comm_config = self.create_comm_config()
         self.tx_config = self.create_tx_config()
    
-
         # 頂部控制區
         self.controls_layout = QtWidgets.QHBoxLayout()
         self.btn_cursor = QtWidgets.QCheckBox("&Cursor")
         self.btn_cursor.toggled.connect(self.cursor_toggle)
         self.btn_rectMode = QtWidgets.QCheckBox("&RectMode")
         self.btn_rectMode.toggled.connect(self.rect_mode_toggle)
-        self.btn_connect = QtWidgets.QPushButton("")
-        self.btn_connect.setFixedSize(100, 30)
-        self.btn_connect.setCheckable(True)
-        self.btn_connect.toggled.connect(self.conncet_toggle)
-        self.btn_config = QtWidgets.QPushButton("&Config")
-        self.btn_config.setFixedSize(80, 30)
-        self.btn_config.clicked.connect(self.open_port_settings_dialog)
         self.btn_autoY = QtWidgets.QPushButton("Auto&Y")
         self.btn_autoY.setFixedSize(80, 30)
         self.btn_autoY.clicked.connect(self.auto_y)
@@ -161,18 +155,15 @@ class SerialPlot:
         self.spin_x_width.setFixedSize(120, 30)
         self.spin_x_width.setSingleStep(100)
         self.spin_x_width.valueChanged.connect(self.update_x_range)
-        self.btn_clear = QtWidgets.QPushButton("Clear🧹")
-        self.btn_clear.setFixedSize(100, 30)
-        self.btn_clear.clicked.connect(self.clear_data)
-        self.controls_layout.addWidget(self.btn_connect)
-        self.controls_layout.addWidget(self.btn_config)
         self.controls_layout.addWidget(self.btn_cursor)
         self.controls_layout.addWidget(self.btn_rectMode)
         self.controls_layout.addWidget(self.btn_autoY)
         self.controls_layout.addWidget(self.btn_followX)
         self.controls_layout.addWidget(self.spin_x_width)
-        self.controls_layout.addWidget(self.btn_clear)
         self.controls_layout.addStretch()
+
+        # Toolbar on top
+        self.create_toolbar()
 
         # 傳送控制區
         self.tx_layout = QtWidgets.QHBoxLayout()
@@ -284,13 +275,95 @@ class SerialPlot:
         self.tx_controller.finished.connect(self.tx_finished)
         self.tx_controller.failed.connect(self.tx_failed)
         self.tx_controller.rejected.connect(self.tx_status.setText)
-        self.conncet_toggle(False)
+        self.disconnect_serial()
 
         # debug
         self.validation_sin_phase = 0.0     # only for validation function: update_validation_sin()
 
 # ========================================================
 # ========================================================        
+# ========================================================
+    def create_toolbar(self):
+        self.main_toolbar = QtWidgets.QToolBar("Main", self.main_win)
+        self.main_toolbar.setIconSize(QtCore.QSize(40, 40))
+        self.main_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        self.main_toolbar.setStyleSheet("QToolButton { font-size: 9pt; }")
+        self.main_win.addToolBar(QtCore.Qt.TopToolBarArea, self.main_toolbar)
+
+        self.icon_connect = QtGui.QIcon(str(ICON_DIR / "connect.svg"))
+        self.icon_disconnect = QtGui.QIcon(str(ICON_DIR / "disconnect.svg"))
+
+        self.action_connect_toggle = QtWidgets.QAction(
+            self.icon_connect, "Connect", self.main_win
+        )
+        self.action_com_setting = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "com_setting.svg")), "COM", self.main_win
+        )
+        self.action_clear = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "clear.svg")), "Clear", self.main_win
+        )
+        self.action_close = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "close.svg")), "Close", self.main_win
+        )
+
+        self.action_connect_toggle.setToolTip("Connect")
+        self.action_com_setting.setToolTip("COM Port Settings")
+        self.action_clear.setToolTip("Clear Plot Data")
+        self.action_close.setToolTip("Close Application")
+
+        self.action_connect_toggle.triggered.connect(self.toggle_serial_connection)
+        self.action_com_setting.triggered.connect(self.open_port_settings_dialog)
+        self.action_clear.triggered.connect(self.clear_data)
+        self.action_close.triggered.connect(self.close_application)
+
+        self.main_toolbar.addAction(self.action_connect_toggle)
+        self.main_toolbar.addAction(self.action_com_setting)
+        self.main_toolbar.addAction(self.action_clear)
+        self.main_toolbar.addSeparator()
+        self.main_toolbar.addAction(self.action_close)
+        self.set_toolbar_button_widths()
+
+# ========================================================
+    def set_toolbar_button_widths(self):
+        button_widths = {
+            self.action_connect_toggle: 100,
+            self.action_com_setting: 60,
+            self.action_clear: 60,
+            self.action_close: 60,
+        }
+
+        for action, width in button_widths.items():
+            button = self.main_toolbar.widgetForAction(action)
+            if button:
+                button.setFixedWidth(width)
+                button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+
+# ========================================================
+    def update_toolbar_actions(self, connected):
+        if connected:
+            self.action_connect_toggle.setText("Disconnect")
+            self.action_connect_toggle.setIcon(self.icon_disconnect)
+            self.action_connect_toggle.setToolTip("Disconnect")
+        else:
+            self.action_connect_toggle.setText("Connect")
+            self.action_connect_toggle.setIcon(self.icon_connect)
+            self.action_connect_toggle.setToolTip("Connect")
+
+        self.action_com_setting.setEnabled(not connected)
+
+# ========================================================
+    def toggle_serial_connection(self):
+        if self.ser.is_open:
+            self.disconnect_serial()
+        else:
+            self.connect_serial()
+
+# ========================================================
+    def close_application(self):
+        if self.ser.is_open:
+            self.disconnect_serial()
+        self.main_win.close()
+
 # ========================================================
     def create_comm_config(self):
         return SerialCommConfig(
@@ -511,11 +584,7 @@ class SerialPlot:
 # ========================================================
     def rx_failed(self, message):
         print(message)
-        self.tx_status.setText("RX failed")
-        if self.btn_connect.isChecked():
-            self.btn_connect.setChecked(False)
-        else:
-            self.conncet_toggle(False)
+        self.disconnect_serial("RX failed")
 # ========================================================
 # ========================================================
 # ========================================================
@@ -560,36 +629,45 @@ class SerialPlot:
             
 # ========================================================
     # ----- Start/Stop
-    def conncet_toggle(self, checked):
-        if checked:
-            self.btn_connect.setStyleSheet("background-color : palegreen")
-            self.btn_connect.setText("🟢 Running")
-            self.btn_config.setEnabled(False)
-            self.clear_data()
-            if DEBUG_LINE_ENABLE:
-                self.timer.start(UPDATE_INTERVAL)
+    def connect_serial(self):
+        if self.ser.is_open:
+            return
+
+        self.clear_data()
+        if DEBUG_LINE_ENABLE:
+            self.timer.start(UPDATE_INTERVAL)
+
+        try:
             apply_serial_config(self.ser, self.comm_config)
             self.ser.open()
             self.ser.reset_input_buffer()
             self.rx_controller.start(self.ser, self.create_rx_plot_parser())
-            self.tx_input.setEnabled(True)
-            self.combo_tx_line_end.setEnabled(True)
-            self.btn_send.setEnabled(True)
-            self.com_status_icon.setText("🟢")
-            self.tx_status.setText("COM opened")
-        else:
+        except Exception as e:
+            print(f"COM open error: {e}")
             self.timer.stop()
-            self.btn_connect.setStyleSheet("background-color : lightpink")
-            self.btn_connect.setText("🔴 Stop")
-            self.rx_controller.stop()
             if self.ser.is_open:
                 self.ser.close()
-            self.tx_input.setEnabled(False)
-            self.combo_tx_line_end.setEnabled(False)
-            self.btn_send.setEnabled(False)
-            self.btn_config.setEnabled(True)
-            self.com_status_icon.setText("🔴")
-            self.tx_status.setText("COM closed")
+            self.set_connected_ui(False, "COM open error")
+            return
+
+        self.set_connected_ui(True)
+
+    def disconnect_serial(self, status_text="COM closed"):
+        self.timer.stop()
+        self.rx_controller.stop()
+        if self.ser.is_open:
+            self.ser.close()
+        self.set_connected_ui(False, status_text)
+
+    def set_connected_ui(self, connected, status_text=None):
+        self.tx_input.setEnabled(connected)
+        self.combo_tx_line_end.setEnabled(connected)
+        self.btn_send.setEnabled(connected)
+        self.update_toolbar_actions(connected)
+        self.com_status_icon.setText("🟢" if connected else "🔴")
+        if status_text is None:
+            status_text = "COM opened" if connected else "COM closed"
+        self.tx_status.setText(status_text)
 
 
     # ----- RectMode
