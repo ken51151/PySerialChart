@@ -2,14 +2,11 @@
 
 import sys
 from pathlib import Path
-import struct
-import math
-import numpy as np
-import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 from enum import IntEnum
 from serial_comm import SerialCommConfig, apply_serial_config, create_serial_port
 from port_settings_dialog import PortSettingsDialog
+from plot_window import PlotWindow
 from serial_tx import (
     DEFAULT_TX_CONFIG,
     TX_WRITE_TIMEOUT,
@@ -92,6 +89,8 @@ SEP = CUSTOM_END.encode()   # 預先計算分隔符避免即時運算的花費
 X_FOLLOW_WIDTH_DEFAULT = 2000   # default X width while following latest data
 UI_FONT_FAMILY = "Microsoft JhengHei UI"
 UI_FONT_POINT_DELTA = 2
+RX_TERMINAL_FONT_FAMILY = "Cascadia Mono"
+RX_TERMINAL_FONT_SIZE = 12
 
 # --------------------------------------------------------
 # table for value mode
@@ -130,38 +129,13 @@ class SerialPlot:
         self.main_win = QtWidgets.QMainWindow()
         self.main_win.setWindowTitle(f"{WINDOWS_TITLE} v{VERSION}")
         self.main_win.resize(800, 600)
+        self.main_win.closeEvent = self.main_window_close_event
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
         self.comm_config = self.create_comm_config()
         self.tx_config = self.create_tx_config()
    
-        # 頂部控制區
-        self.controls_layout = QtWidgets.QHBoxLayout()
-        self.btn_cursor = QtWidgets.QCheckBox("&Cursor")
-        self.btn_cursor.toggled.connect(self.cursor_toggle)
-        self.btn_rectMode = QtWidgets.QCheckBox("&RectMode")
-        self.btn_rectMode.toggled.connect(self.rect_mode_toggle)
-        self.btn_autoY = QtWidgets.QPushButton("Auto&Y")
-        self.btn_autoY.setFixedSize(80, 30)
-        self.btn_autoY.clicked.connect(self.auto_y)
-        self.btn_followX = QtWidgets.QCheckBox("Follow&X")
-        self.btn_followX.setChecked(True)
-        self.btn_followX.toggled.connect(self.follow_x_toggle)
-        self.spin_x_width = QtWidgets.QSpinBox()
-        self.spin_x_width.setRange(1, MAX_POINTS)
-        self.spin_x_width.setValue(X_FOLLOW_WIDTH_DEFAULT)
-        self.spin_x_width.setSuffix(" pts")
-        self.spin_x_width.setFixedSize(120, 30)
-        self.spin_x_width.setSingleStep(100)
-        self.spin_x_width.valueChanged.connect(self.update_x_range)
-        self.controls_layout.addWidget(self.btn_cursor)
-        self.controls_layout.addWidget(self.btn_rectMode)
-        self.controls_layout.addWidget(self.btn_autoY)
-        self.controls_layout.addWidget(self.btn_followX)
-        self.controls_layout.addWidget(self.spin_x_width)
-        self.controls_layout.addStretch()
-
         # Toolbar on top
         self.create_toolbar()
 
@@ -186,13 +160,13 @@ class SerialPlot:
         self.tx_layout.addWidget(self.btn_send)
         # self.tx_layout.addStretch()       // add stretch in right side
 
-        # 曲線圖
-        self.win = pg.GraphicsLayoutWidget()
-        self.win.setMinimumHeight(200)
-        self.plot = self.win.addPlot()
-        self.plot.showGrid(x=True, y=True)
-        self.plot.setYRange(-2000, 2000, padding=0.05)
-        self.plot.setXRange(0, X_FOLLOW_WIDTH_DEFAULT, padding=0)
+        # 接收資料顯示區
+        self.rx_terminal = QtWidgets.QPlainTextEdit()
+        self.rx_terminal.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.rx_terminal.setMinimumHeight(300)
+        terminal_font = QtGui.QFont(RX_TERMINAL_FONT_FAMILY, RX_TERMINAL_FONT_SIZE)
+        terminal_font.setStyleHint(QtGui.QFont.Monospace)
+        self.rx_terminal.setFont(terminal_font)
 
         # 狀態列
         self.com_status_icon = QtWidgets.QLabel("")
@@ -202,23 +176,9 @@ class SerialPlot:
         self.status_bar.addWidget(self.tx_status, 1)
 
         # 將元件加入layout
-        self.layout.addLayout(self.controls_layout)
         self.layout.addLayout(self.tx_layout)
-        self.layout.addWidget(self.win)
+        self.layout.addWidget(self.rx_terminal)
         self.main_win.setStatusBar(self.status_bar)
-
-        # 輔助線
-        self.vLine = pg.InfiniteLine(angle=90, movable=False, pen='w')
-        self.hLine = pg.InfiniteLine(angle=0, movable=False, pen='w')
-        self.label = pg.TextItem(anchor=(1,1), color='y')
-        self.plot.addItem(self.vLine, ignoreBounds=True)
-        self.plot.addItem(self.hLine, ignoreBounds=True)
-        self.plot.addItem(self.label)
-        self.mouse_proxy = None 
-        self.cursor_hide()
-        # 省效能設定
-        # self.plot.setDownsampling(mode='peak')  # 降取樣功能, 'peak'或是 'mean', 
-        # self.plot.setClipToView(True)           # 只畫出目前視窗看得到的點
 
         # others
         print(f"{WINDOWS_TITLE} v{VERSION}")
@@ -229,19 +189,11 @@ class SerialPlot:
         elif SEP_MODE == SEP_MODES.LENGTH:              self.rx_sep_mode = "length"             ; info += "固定長度分段模式"
         else:                                           print('ERROR, invalid SEP_MODE!!!')     ; info += "!!! 模式錯誤 !!!"
 
-        self.max_current_idx = 0
-        self.curves_data = {}   # 字典管理多條線段： { "name": {"buf": array, "idx": 0, "curve": pg_object} }
         if   LINE_MODE == LINE_MODES.SINGLE_LINE:
             info += ", 單線段模式"
-            buf = np.full(MAX_POINTS, np.nan)  # curve 原始資料
-            curve = self.plot.plot(pen=colors[0])
-            curve.setData(buf, connect="finite")
-            self.curves_data["default"] = {"buf": buf, "idx": 0, "curve": curve}
             self.rx_line_mode = "single"
         elif LINE_MODE == LINE_MODES.MULTI_LINE_ASCII:
             info += ", 多線段ASCII模式"
-            # 多線段會動態新增線段
-            self.plot.addLegend()   # 多線段模式建議開啟圖例
             self.rx_line_mode = "multi_ascii"
         else:
             info += "!!! 線段設定錯誤 !!!"  
@@ -258,16 +210,29 @@ class SerialPlot:
             self.rx_value_type, self.rx_value_fmt, self.rx_value_size = ('ASCII', int, 4)
         print(info)
 
+        self.plot_window = PlotWindow(
+            MAX_POINTS,
+            MAX_LINES,
+            X_FOLLOW_WIDTH_DEFAULT,
+            self.rx_line_mode,
+            colors,
+            DEBUG_LINE_ENABLE,
+        )
+        self.plot_window.hidden.connect(self.plot_window_hidden)
+        self.plot_window.clear_requested.connect(self.reset_plot_parser)
+        self.plot_window.plot_running_changed.connect(self.set_plot_running)
+
         # update timer (validation only; RX uses SerialRxController)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
 
         # rx controller
         self.rx_controller = SerialRxController(UPDATE_INTERVAL)
-        # RX thread emits already parsed plot batches; main thread only updates UI/curves.
-        self.rx_controller.plot_batch_ready.connect(self.update_plot_batch)
+        # PlotWindow owns curve buffers; the main window only routes parsed plot batches.
+        self.rx_controller.plot_batch_ready.connect(self.plot_window.update_plot_batch)
         self.rx_controller.raw_received.connect(self.handle_terminal_raw_rx)
         self.rx_controller.failed.connect(self.rx_failed)
+        self.rx_controller.set_terminal_enabled(True)
 
         # tx controller
         self.tx_controller = TxController(self.tx_config)
@@ -276,9 +241,6 @@ class SerialPlot:
         self.tx_controller.failed.connect(self.tx_failed)
         self.tx_controller.rejected.connect(self.tx_status.setText)
         self.disconnect_serial()
-
-        # debug
-        self.validation_sin_phase = 0.0     # only for validation function: update_validation_sin()
 
 # ========================================================
 # ========================================================        
@@ -290,14 +252,17 @@ class SerialPlot:
         self.main_toolbar.setStyleSheet("QToolButton { font-size: 9pt; }")
         self.main_win.addToolBar(QtCore.Qt.TopToolBarArea, self.main_toolbar)
 
-        self.icon_connect = QtGui.QIcon(str(ICON_DIR / "connect.svg"))
-        self.icon_disconnect = QtGui.QIcon(str(ICON_DIR / "disconnect.svg"))
+        self.icon_connect = QtGui.QIcon(str(ICON_DIR / "connected.svg"))
+        self.icon_disconnect = QtGui.QIcon(str(ICON_DIR / "disconnected.svg"))
 
         self.action_connect_toggle = QtWidgets.QAction(
-            self.icon_connect, "Connect", self.main_win
+            self.icon_disconnect, "Connect", self.main_win
         )
         self.action_com_setting = QtWidgets.QAction(
             QtGui.QIcon(str(ICON_DIR / "com_setting.svg")), "COM", self.main_win
+        )
+        self.action_plot = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "plot.svg")), "Plot", self.main_win
         )
         self.action_clear = QtWidgets.QAction(
             QtGui.QIcon(str(ICON_DIR / "clear.svg")), "Clear", self.main_win
@@ -308,16 +273,19 @@ class SerialPlot:
 
         self.action_connect_toggle.setToolTip("Connect")
         self.action_com_setting.setToolTip("COM Port Settings")
-        self.action_clear.setToolTip("Clear Plot Data")
+        self.action_plot.setToolTip("Show Plot")
+        self.action_clear.setToolTip("Clear")
         self.action_close.setToolTip("Close Application")
+        self.action_clear.setEnabled(False)
 
         self.action_connect_toggle.triggered.connect(self.toggle_serial_connection)
         self.action_com_setting.triggered.connect(self.open_port_settings_dialog)
-        self.action_clear.triggered.connect(self.clear_data)
+        self.action_plot.triggered.connect(self.show_plot_window)
         self.action_close.triggered.connect(self.close_application)
 
         self.main_toolbar.addAction(self.action_connect_toggle)
         self.main_toolbar.addAction(self.action_com_setting)
+        self.main_toolbar.addAction(self.action_plot)
         self.main_toolbar.addAction(self.action_clear)
         self.main_toolbar.addSeparator()
         self.main_toolbar.addAction(self.action_close)
@@ -328,6 +296,8 @@ class SerialPlot:
         button_widths = {
             self.action_connect_toggle: 100,
             self.action_com_setting: 60,
+            self.action_plot: 60,
+            self.action_rx_display_mode: 90,
             self.action_clear: 60,
             self.action_close: 60,
         }
@@ -342,14 +312,34 @@ class SerialPlot:
     def update_toolbar_actions(self, connected):
         if connected:
             self.action_connect_toggle.setText("Disconnect")
-            self.action_connect_toggle.setIcon(self.icon_disconnect)
+            self.action_connect_toggle.setIcon(self.icon_connect)
             self.action_connect_toggle.setToolTip("Disconnect")
         else:
             self.action_connect_toggle.setText("Connect")
-            self.action_connect_toggle.setIcon(self.icon_connect)
+            self.action_connect_toggle.setIcon(self.icon_disconnect)
             self.action_connect_toggle.setToolTip("Connect")
 
         self.action_com_setting.setEnabled(not connected)
+
+# ========================================================
+    def show_plot_window(self):
+        if not self.plot_window.isVisible():
+            self.plot_window.move(self.main_win.x() + 120, self.main_win.y() + 120)
+        self.plot_window.show()
+        self.plot_window.raise_()
+        self.plot_window.activateWindow()
+
+# ========================================================
+    def plot_window_hidden(self):
+        pass
+
+# ========================================================
+    def set_plot_running(self, running):
+        self.rx_controller.set_plot_enabled(running)
+
+# ========================================================
+    def reset_plot_parser(self):
+        self.rx_controller.reset_plot_parser()
 
 # ========================================================
     def toggle_serial_connection(self):
@@ -360,9 +350,14 @@ class SerialPlot:
 
 # ========================================================
     def close_application(self):
+        self.main_win.close()
+
+# ========================================================
+    def main_window_close_event(self, event):
         if self.ser.is_open:
             self.disconnect_serial()
-        self.main_win.close()
+        self.plot_window.hide()
+        event.accept()
 
 # ========================================================
     def create_comm_config(self):
@@ -437,6 +432,7 @@ class SerialPlot:
             self.btn_send.setEnabled(True)
         status_prefix = "Queued" if TX_WRITE_TIMEOUT == 0 else "Sent"
         self.tx_status.setText(f"{status_prefix} {bytes_sent}/{total_bytes} bytes")
+        self.append_terminal_text(f">> {text}\n")
         self.tx_input.remember(text)
 
 # ========================================================
@@ -449,109 +445,15 @@ class SerialPlot:
 # ========================================================
 # ========================================================
 # ========================================================
-    def update_line_single_values(self, values):
-        # 單線模式直接對應到 "default" 線段
-        curve_info = self.curves_data.get("default")
-
-        try:
-            if not values:
-                return
-
-            self._append_curve_values(curve_info, values)
-            self.max_current_idx = curve_info["idx"]
-            v_len = self.max_current_idx        # 有效資料點數量 (僅傳有效資料給curve)
-            curve_info["curve"].setData(curve_info["buf"][:v_len], connect="finite")
-            # curve_info["curve"].setData(buf[::2], connect="finite")     # 更新curve, 2點取1點, 當資料過大時可考慮
-            self.update_x_range()
-
-        except ValueError as e:
-            print(f"Data conversion error: {e}")
-# ========================================================
-    def _get_or_create_curve(self, name):
-        # 根據名稱取得線段資訊，若不存在則動態建立 (最多10條)
-        if name not in self.curves_data:
-            if len(self.curves_data) >= MAX_LINES:
-                return None # 超過數量限制不處理
-            
-            # 建立新的線段與 Buffer
-            buf = np.full(MAX_POINTS, np.nan)
-            # 自動給予不同顏色 (簡單輪詢)
-            color = colors[len(self.curves_data) % len(colors)]
-            
-            curve = self.plot.plot(pen=color, name=name)
-            self.curves_data[name] = {"buf": buf, "idx": 0, "curve": curve}
-            
-        return self.curves_data[name]
-# ========================================================
-    def _append_curve_value(self, curve_info, value):
-        buf = curve_info["buf"]
-        idx = curve_info["idx"]
-        if idx < MAX_POINTS:
-            buf[idx] = value
-            curve_info["idx"] += 1
-        else:
-            buf[:-1] = buf[1:]
-            buf[-1] = value
-# ========================================================
-    def _append_curve_values(self, curve_info, values):
-        num_new = len(values)
-        if num_new == 0:
-            return
-
-        buf = curve_info["buf"]
-        idx = curve_info["idx"]
-
-        if num_new >= MAX_POINTS:
-            buf[:] = values[-MAX_POINTS:]
-            curve_info["idx"] = MAX_POINTS
-        elif idx + num_new <= MAX_POINTS:
-            buf[idx : idx + num_new] = values
-            curve_info["idx"] += num_new
-        else:
-            overflow = idx + num_new - MAX_POINTS
-            keep_len = idx - overflow
-            buf[:keep_len] = buf[overflow:idx]
-            buf[keep_len:] = values
-            curve_info["idx"] = MAX_POINTS
-# ========================================================
-    def update_line_ascii_series(self, series):
-        try:
-            # 同一批資料依線段分組後再批次更新Buffer，避免滿Buffer時逐筆搬移
-            for name, values in series.items():
-                curve_info = self._get_or_create_curve(name)
-                if not curve_info:      continue        # 取得線條資料失敗
-                self._append_curve_values(curve_info, values)
-
-            # 尋找資料最長的線段
-            if self.curves_data:
-                self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
-
-            # 更新繪圖與自動調整畫面
-            for name in series:
-                if name not in self.curves_data:
-                    continue
-                info = self.curves_data[name]
-                v_len = self.max_current_idx        # 有效資料點數量 (僅傳有效資料給curve)
-                info["curve"].setData(info["buf"][:v_len], connect="finite")
-            
-            # 調整 X 軸範圍 (從 0 到最長點)
-            if self.max_current_idx > 0:
-                self.update_x_range()
-
-        except Exception as e:
-            print(f"Multi-line process error: {e}")
-# ========================================================
-    def update_plot_batch(self, batch):
-        if batch["mode"] == "single":
-            self.update_line_single_values(batch["values"])
-        elif batch["mode"] == "multi_ascii":
-            self.update_line_ascii_series(batch["series"])
-# ========================================================
-# ========================================================
-# ========================================================
     def handle_terminal_raw_rx(self, raw_rx):
-        # Reserved for the future terminal window raw-data pipeline.
-        pass
+        self.append_terminal_text(raw_rx.decode('ascii'))
+
+    def append_terminal_text(self, text):
+        cursor = self.rx_terminal.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        cursor.insertText(text)
+        self.rx_terminal.setTextCursor(cursor)
+        self.rx_terminal.ensureCursorVisible()
 
 # ========================================================
 # ========================================================
@@ -586,54 +488,16 @@ class SerialPlot:
         print(message)
         self.disconnect_serial("RX failed")
 # ========================================================
-# ========================================================
-# ========================================================
-    def update_validation_sin(self):
-        VALIDATION_SIN_POINTS = 5       # 每次Timer更新新增幾個sin點
-        VALIDATION_SIN_STEP = 0.08      # sin相位步進
-        VALIDATION_SIN_AMPLITUDE = 24689
-        VALIDATION_SIN_OFFSET = 7777
-
-        if LINE_MODE == LINE_MODES.SINGLE_LINE:
-            curve_info = self.curves_data.get("default")
-        else:
-            curve_info = self._get_or_create_curve("sin")
-
-        if not curve_info:
-            return
-
-        for _ in range(VALIDATION_SIN_POINTS):
-            value = (math.sin(self.validation_sin_phase) * VALIDATION_SIN_AMPLITUDE) + VALIDATION_SIN_OFFSET
-            self._append_curve_value(curve_info, value)
-            self.validation_sin_phase += VALIDATION_SIN_STEP
-
-        self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
-        v_len = self.max_current_idx
-        curve_info["curve"].setData(curve_info["buf"][:v_len], connect="finite")
-
-        if self.max_current_idx > 0:
-            self.update_x_range()
-# ========================================================
     def update(self):
-        if DEBUG_LINE_ENABLE:
-            self.update_validation_sin()        # test line feature
-# ========================================================
-    def mouseMoved(self, evt):
-        pos = evt[0]        # 滑鼠在 Scene 中的位置
-        if self.plot.sceneBoundingRect().contains(pos):
-            mousePoint = self.plot.vb.mapSceneToView(pos)
-            self.vLine.setPos(mousePoint.x())       # 更新十字線位置
-            self.hLine.setPos(mousePoint.y())
-            self.label.setText(f"X: {mousePoint.x():.1f}\nY: {mousePoint.y():.2f}")
-            self.label.setPos(mousePoint.x(), mousePoint.y())   # 跟著滑鼠跑
-            
+        self.plot_window.update_validation_data()
+
 # ========================================================
     # ----- Start/Stop
     def connect_serial(self):
         if self.ser.is_open:
             return
 
-        self.clear_data()
+        self.plot_window.clear_data()
         if DEBUG_LINE_ENABLE:
             self.timer.start(UPDATE_INTERVAL)
 
@@ -670,89 +534,6 @@ class SerialPlot:
         self.tx_status.setText(status_text)
 
 
-    # ----- RectMode
-    def rect_mode_toggle(self, checked):
-        if checked:     self.plot.vb.setMouseMode(pg.ViewBox.RectMode)
-        else:           self.plot.vb.setMouseMode(pg.ViewBox.PanMode)
-    # ----- Follow X
-    def follow_x_toggle(self, checked):
-        self.spin_x_width.setEnabled(checked)
-        if checked:
-            self.update_x_range()
-    def update_x_range(self):
-        if not self.btn_followX.isChecked():
-            return
-
-        x_width = self.spin_x_width.value()
-        x_end = max(self.max_current_idx, x_width)
-        x_start = x_end - x_width
-        self.plot.setXRange(x_start, x_end, padding=0)
-    # ----- Cursor
-    def cursor_toggle(self, checked):
-        if checked:     self.cursor_show()
-        else:           self.cursor_hide()
-    def cursor_show(self):
-        self.vLine.show()
-        self.hLine.show()
-        self.label.show()
-        if self.mouse_proxy is None:        # 連結 mouseMoved() 事件
-            self.mouse_proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=30, slot=self.mouseMoved)
-    def cursor_hide(self):
-        self.vLine.hide()
-        self.hLine.hide()
-        self.label.hide()
-        if self.mouse_proxy is not None:
-            self.mouse_proxy.disconnect()   # 斷開訊號
-            self.mouse_proxy = None         # 清空物件，停止監聽
-    # ----- Auto Y
-    def auto_y(self):
-        y_range = self._get_data_y_range()
-        if y_range is None:
-            return            
-        self.plot.setYRange(y_range[0], y_range[1], padding=0.05)
-
-    def _get_data_y_range(self):
-        if not self.curves_data:
-            return None
-
-        y_min = None
-        y_max = None
-        for info in self.curves_data.values():
-            idx = min(info["idx"], MAX_POINTS)
-            if idx <= 0:
-                continue
-
-            values = info["buf"][:idx]
-            values = values[np.isfinite(values)]
-            if not values.size:
-                continue
-
-            curve_min = float(np.min(values))
-            curve_max = float(np.max(values))
-            y_min = curve_min if y_min is None else min(y_min, curve_min)
-            y_max = curve_max if y_max is None else max(y_max, curve_max)
-
-        if y_min is None or y_max is None:
-            return None
-
-        if y_min == y_max:
-            margin = max(abs(y_min) * 0.05, 1.0)
-            return y_min - margin, y_max + margin
-
-        return y_min, y_max
-    # ----- Clear
-    def clear_data(self):
-        self.max_current_idx = 0
-        # Clear parser residual as well as visible curve buffers.
-        self.rx_controller.reset_plot_parser()
-
-        # 將已建立的線段進行重設
-        for name, info in self.curves_data.items():
-            info["buf"].fill(np.nan)
-            info["idx"] = 0
-            info["curve"].setData(info["buf"])
-
-        self.update_x_range()
 # ========================================================
     def run(self):
         self.main_win.show()

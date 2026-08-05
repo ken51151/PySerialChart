@@ -175,10 +175,11 @@ class SerialRxWorker(QtCore.QObject):
         self.max_values = max_values
         self.running = False
         self.terminal_enabled = False
-        self.plot_enabled = True
+        self.plot_enabled = False
         self.raw_pending = bytearray()
         self.plot_pending = None
         self.pending_value_count = 0
+        self.handle_rx_data = self._handle_rx_noop
 
     @QtCore.pyqtSlot()
     def run(self):
@@ -194,14 +195,7 @@ class SerialRxWorker(QtCore.QObject):
                 break
 
             if data:
-                if self.terminal_enabled:
-                    self.raw_pending.extend(data)
-
-                if self.plot_enabled:
-                    batch, value_count = self.parser.feed(data)
-                    if batch:
-                        self._merge_plot_batch(batch)
-                        self.pending_value_count += value_count
+                self.handle_rx_data(data)
 
             now = time.perf_counter()
             if (
@@ -223,16 +217,47 @@ class SerialRxWorker(QtCore.QObject):
     @QtCore.pyqtSlot(bool)
     def set_terminal_enabled(self, enabled):
         self.terminal_enabled = enabled
+        self._bind_rx_data_handler()
         if not enabled:
             self.raw_pending.clear()
 
     @QtCore.pyqtSlot(bool)
     def set_plot_enabled(self, enabled):
         self.plot_enabled = enabled
+        self._bind_rx_data_handler()
         if not enabled:
             self.plot_pending = None
             self.pending_value_count = 0
             self.parser.reset()
+
+    def _bind_rx_data_handler(self):
+        if self.terminal_enabled and self.plot_enabled:
+            self.handle_rx_data = self._handle_rx_terminal_plot
+        elif self.terminal_enabled:
+            self.handle_rx_data = self._handle_rx_terminal_only
+        elif self.plot_enabled:
+            self.handle_rx_data = self._handle_rx_plot_only
+        else:
+            self.handle_rx_data = self._handle_rx_noop
+
+    def _handle_rx_noop(self, data):
+        pass
+
+    def _handle_rx_terminal_only(self, data):
+        self.raw_pending.extend(data)
+
+    def _handle_rx_plot_only(self, data):
+        batch, value_count = self.parser.feed(data)
+        if batch:
+            self._merge_plot_batch(batch)
+            self.pending_value_count += value_count
+
+    def _handle_rx_terminal_plot(self, data):
+        self.raw_pending.extend(data)
+        batch, value_count = self.parser.feed(data)
+        if batch:
+            self._merge_plot_batch(batch)
+            self.pending_value_count += value_count
 
     @QtCore.pyqtSlot()
     def reset_plot_parser(self):
@@ -285,7 +310,7 @@ class SerialRxController(QtCore.QObject):
         self.thread = None
         self.worker = None
         self.terminal_enabled = False
-        self.plot_enabled = True
+        self.plot_enabled = False
 
     def is_running(self):
         return self.thread is not None and self.thread.isRunning()
@@ -298,6 +323,7 @@ class SerialRxController(QtCore.QObject):
         self.worker = SerialRxWorker(ser, parser, self.interval_ms)
         self.worker.terminal_enabled = self.terminal_enabled
         self.worker.plot_enabled = self.plot_enabled
+        self.worker._bind_rx_data_handler()
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.raw_received.connect(self.raw_received)
