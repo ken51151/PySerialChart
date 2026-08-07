@@ -2,11 +2,18 @@
 
 import sys
 from pathlib import Path
+from dataclasses import replace
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 from enum import IntEnum
 from serial_comm import SerialCommConfig, apply_serial_config, create_serial_port
 from port_settings_dialog import PortSettingsDialog
 from plot_window import PlotWindow
+from rx_terminal_config import (
+    RxTerminalConfig,
+    RxTerminalDisplayMode as RX_TERMINAL_DISPLAY_MODES,
+    RxTerminalFrameMode as RX_TERMINAL_FRAME_MODES,
+)
+from rx_terminal_settings_dialog import RxTerminalSettingsDialog
 from serial_tx import (
     DEFAULT_TX_CONFIG,
     TX_WRITE_TIMEOUT,
@@ -92,6 +99,15 @@ UI_FONT_POINT_DELTA = 2
 RX_TERMINAL_FONT_FAMILY = "Cascadia Mono"
 RX_TERMINAL_FONT_SIZE = 12
 
+ASCII_CONTROL_NAMES = (
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL",
+    "BS", "TAB", "LF", "VT", "FF", "CR", "SO", "SI",
+    "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB",
+    "CAN", "EM", "SUB", "ESC", "FS", "GS", "RS", "US",
+)
+ASCII_CONTROL_LABELS = {value: f"[{name}]" for value, name in enumerate(ASCII_CONTROL_NAMES)}
+ASCII_CONTROL_LABELS[0x7F] = "[DEL]"
+
 # --------------------------------------------------------
 # table for value mode
 VALUE_CONFIG_TABLE = {
@@ -135,6 +151,8 @@ class SerialPlot:
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
         self.comm_config = self.create_comm_config()
         self.tx_config = self.create_tx_config()
+        self.rx_terminal_config = RxTerminalConfig()
+        self.rx_terminal_pending = bytearray()
    
         # Toolbar on top
         self.create_toolbar()
@@ -167,6 +185,9 @@ class SerialPlot:
         terminal_font = QtGui.QFont(RX_TERMINAL_FONT_FAMILY, RX_TERMINAL_FONT_SIZE)
         terminal_font.setStyleHint(QtGui.QFont.Monospace)
         self.rx_terminal.setFont(terminal_font)
+        self.rx_terminal_flush_timer = QtCore.QTimer()
+        self.rx_terminal_flush_timer.setSingleShot(True)
+        self.rx_terminal_flush_timer.timeout.connect(self.flush_rx_terminal_pending)
 
         # 狀態列
         self.com_status_icon = QtWidgets.QLabel("")
@@ -247,22 +268,32 @@ class SerialPlot:
 # ========================================================
     def create_toolbar(self):
         self.main_toolbar = QtWidgets.QToolBar("Main", self.main_win)
-        self.main_toolbar.setIconSize(QtCore.QSize(40, 40))
+        self.main_toolbar.setIconSize(QtCore.QSize(52, 52))
         self.main_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
         self.main_toolbar.setStyleSheet("QToolButton { font-size: 9pt; }")
         self.main_win.addToolBar(QtCore.Qt.TopToolBarArea, self.main_toolbar)
 
         self.icon_connect = QtGui.QIcon(str(ICON_DIR / "connected.svg"))
         self.icon_disconnect = QtGui.QIcon(str(ICON_DIR / "disconnected.svg"))
+        self.rx_display_mode_icons = {
+            RX_TERMINAL_DISPLAY_MODES.ASCII: QtGui.QIcon(str(ICON_DIR / "rx_mode_ascii_256.png")),
+            RX_TERMINAL_DISPLAY_MODES.ASCII_HEX: QtGui.QIcon(str(ICON_DIR / "rx_mode_ascii_hex_256.png")),
+            RX_TERMINAL_DISPLAY_MODES.HEX: QtGui.QIcon(str(ICON_DIR / "rx_mode_hex_256.png")),
+        }
 
         self.action_connect_toggle = QtWidgets.QAction(
-            self.icon_disconnect, "Connect", self.main_win
+            self.icon_disconnect, "Disconnected", self.main_win
         )
         self.action_com_setting = QtWidgets.QAction(
             QtGui.QIcon(str(ICON_DIR / "com_setting.svg")), "COM", self.main_win
         )
         self.action_plot = QtWidgets.QAction(
             QtGui.QIcon(str(ICON_DIR / "plot.svg")), "Plot", self.main_win
+        )
+        self.action_rx_display_mode = QtWidgets.QAction(
+            self.rx_display_mode_icons[self.rx_terminal_config.display_mode],
+            "RxMode",
+            self.main_win,
         )
         self.action_clear = QtWidgets.QAction(
             QtGui.QIcon(str(ICON_DIR / "clear.svg")), "Clear", self.main_win
@@ -271,9 +302,10 @@ class SerialPlot:
             QtGui.QIcon(str(ICON_DIR / "close.svg")), "Close", self.main_win
         )
 
-        self.action_connect_toggle.setToolTip("Connect")
+        self.action_connect_toggle.setToolTip("Disconnected")
         self.action_com_setting.setToolTip("COM Port Settings")
         self.action_plot.setToolTip("Show Plot")
+        self.update_rx_display_mode_action()
         self.action_clear.setToolTip("Clear")
         self.action_close.setToolTip("Close Application")
         self.action_clear.setEnabled(False)
@@ -281,25 +313,54 @@ class SerialPlot:
         self.action_connect_toggle.triggered.connect(self.toggle_serial_connection)
         self.action_com_setting.triggered.connect(self.open_port_settings_dialog)
         self.action_plot.triggered.connect(self.show_plot_window)
+        self.action_rx_display_mode.triggered.connect(self.cycle_rx_display_mode)
         self.action_close.triggered.connect(self.close_application)
 
         self.main_toolbar.addAction(self.action_connect_toggle)
         self.main_toolbar.addAction(self.action_com_setting)
         self.main_toolbar.addAction(self.action_plot)
+        self.create_rx_display_tool_button()
         self.main_toolbar.addAction(self.action_clear)
         self.main_toolbar.addSeparator()
         self.main_toolbar.addAction(self.action_close)
         self.set_toolbar_button_widths()
 
 # ========================================================
+    def create_rx_display_tool_button(self):
+        self.rx_display_menu = QtWidgets.QMenu(self.main_win)
+        self.rx_display_action_group = QtWidgets.QActionGroup(self.main_win)
+        self.rx_display_action_group.setExclusive(True)
+        self.rx_display_actions = {}
+
+        for mode in RX_TERMINAL_DISPLAY_MODES:
+            action = QtWidgets.QAction(self.rx_display_mode_label(mode), self.main_win)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, selected=mode: self.set_rx_display_mode(selected))
+            self.rx_display_action_group.addAction(action)
+            self.rx_display_menu.addAction(action)
+            self.rx_display_actions[mode] = action
+
+        self.rx_display_menu.addSeparator()
+        self.action_rx_terminal_settings = QtWidgets.QAction("Frame Settings...", self.main_win)
+        self.action_rx_terminal_settings.triggered.connect(self.open_rx_terminal_settings_dialog)
+        self.rx_display_menu.addAction(self.action_rx_terminal_settings)
+
+        self.rx_display_tool_button = QtWidgets.QToolButton(self.main_win)
+        self.rx_display_tool_button.setDefaultAction(self.action_rx_display_mode)
+        self.rx_display_tool_button.setMenu(self.rx_display_menu)
+        self.rx_display_tool_button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        self.rx_display_tool_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        self.main_toolbar.addWidget(self.rx_display_tool_button)
+        self.update_rx_terminal_menu_actions()
+
+# ========================================================
     def set_toolbar_button_widths(self):
         button_widths = {
             self.action_connect_toggle: 100,
-            self.action_com_setting: 60,
-            self.action_plot: 60,
-            self.action_rx_display_mode: 90,
-            self.action_clear: 60,
-            self.action_close: 60,
+            self.action_com_setting: 80,
+            self.action_plot: 80,
+            self.action_clear: 80,
+            self.action_close: 80,
         }
 
         for action, width in button_widths.items():
@@ -308,18 +369,80 @@ class SerialPlot:
                 button.setFixedWidth(width)
                 button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
 
+        self.rx_display_tool_button.setFixedWidth(100)
+        self.rx_display_tool_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+
 # ========================================================
     def update_toolbar_actions(self, connected):
         if connected:
-            self.action_connect_toggle.setText("Disconnect")
+            self.action_connect_toggle.setText("Connected")
             self.action_connect_toggle.setIcon(self.icon_connect)
-            self.action_connect_toggle.setToolTip("Disconnect")
+            self.action_connect_toggle.setToolTip("Connected")
         else:
-            self.action_connect_toggle.setText("Connect")
+            self.action_connect_toggle.setText("Disconnected")
             self.action_connect_toggle.setIcon(self.icon_disconnect)
-            self.action_connect_toggle.setToolTip("Connect")
+            self.action_connect_toggle.setToolTip("Disconnected")
 
         self.action_com_setting.setEnabled(not connected)
+
+# ========================================================
+    def rx_display_mode_label(self, mode=None):
+        mode = self.rx_terminal_config.display_mode if mode is None else mode
+        if mode == RX_TERMINAL_DISPLAY_MODES.ASCII_HEX:
+            return "ASCII+HEX"
+        if mode == RX_TERMINAL_DISPLAY_MODES.HEX:
+            return "HEX"
+        return "ASCII"
+
+# ========================================================
+    def update_rx_display_mode_action(self):
+        label = self.rx_display_mode_label()
+        self.action_rx_display_mode.setText("RxMode")
+        self.action_rx_display_mode.setIcon(
+            self.rx_display_mode_icons[self.rx_terminal_config.display_mode]
+        )
+        self.action_rx_display_mode.setToolTip(f"RX Display: {label}, {self.rx_terminal_frame_label()}")
+
+# ========================================================
+    def update_rx_terminal_menu_actions(self):
+        self.rx_display_actions[self.rx_terminal_config.display_mode].setChecked(True)
+
+# ========================================================
+    def cycle_rx_display_mode(self):
+        next_value = (int(self.rx_terminal_config.display_mode) + 1) % len(RX_TERMINAL_DISPLAY_MODES)
+        self.set_rx_display_mode(RX_TERMINAL_DISPLAY_MODES(next_value))
+
+# ========================================================
+    def set_rx_display_mode(self, mode):
+        self.flush_rx_terminal_pending()
+        self.rx_terminal_config = replace(self.rx_terminal_config, display_mode=mode)
+        self.update_rx_display_mode_action()
+        self.update_rx_terminal_menu_actions()
+        self.tx_status.setText(f"RX display: {self.rx_display_mode_label()}")
+
+# ========================================================
+    def apply_rx_terminal_config(self, config):
+        self.flush_rx_terminal_pending()
+        self.rx_terminal_config = config
+        self.update_rx_display_mode_action()
+        self.update_rx_terminal_menu_actions()
+        self.tx_status.setText(f"RX frame: {self.rx_terminal_frame_label()}")
+
+# ========================================================
+    def open_rx_terminal_settings_dialog(self):
+        dialog = RxTerminalSettingsDialog(
+            self.rx_terminal_config,
+            len(self.rx_terminal_pending),
+            self.main_win,
+        )
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_rx_terminal_config(dialog.get_config())
+
+# ========================================================
+    def rx_terminal_frame_label(self):
+        if self.rx_terminal_config.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+            return f"Fixed {self.rx_terminal_config.fixed_length}"
+        return f"Ending {self.rx_terminal_config.terminator_name}"
 
 # ========================================================
     def show_plot_window(self):
@@ -432,6 +555,7 @@ class SerialPlot:
             self.btn_send.setEnabled(True)
         status_prefix = "Queued" if TX_WRITE_TIMEOUT == 0 else "Sent"
         self.tx_status.setText(f"{status_prefix} {bytes_sent}/{total_bytes} bytes")
+        self.flush_rx_terminal_pending()
         self.append_terminal_text(f">> {text}\n")
         self.tx_input.remember(text)
 
@@ -446,7 +570,18 @@ class SerialPlot:
 # ========================================================
 # ========================================================
     def handle_terminal_raw_rx(self, raw_rx):
-        self.append_terminal_text(raw_rx.decode('ascii'))
+        self.rx_terminal_pending.extend(raw_rx)
+        text = self.take_complete_rx_terminal_frames()
+        if text:
+            self.append_terminal_text(text)
+
+        if self.rx_terminal_pending:
+            if len(self.rx_terminal_pending) >= self.rx_terminal_config.pending_limit:
+                self.flush_rx_terminal_pending()
+            else:
+                self.rx_terminal_flush_timer.start(self.rx_terminal_config.idle_timeout_ms)
+        else:
+            self.rx_terminal_flush_timer.stop()
 
     def append_terminal_text(self, text):
         cursor = self.rx_terminal.textCursor()
@@ -454,6 +589,72 @@ class SerialPlot:
         cursor.insertText(text)
         self.rx_terminal.setTextCursor(cursor)
         self.rx_terminal.ensureCursorVisible()
+
+    def take_complete_rx_terminal_frames(self):
+        if self.rx_terminal_config.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+            return self.take_fixed_length_rx_terminal_frames()
+        return self.take_terminator_rx_terminal_frames()
+
+    def take_terminator_rx_terminal_frames(self):
+        output = []
+        terminator = self.rx_terminal_config.terminator
+        terminator_len = len(terminator)
+
+        while True:
+            index = self.rx_terminal_pending.find(terminator)
+            if index < 0:
+                break
+
+            end = index + terminator_len
+            output.append(self.format_rx_terminal_line(bytes(self.rx_terminal_pending[:end])))
+            del self.rx_terminal_pending[:end]
+
+        return "".join(output)
+
+    def take_fixed_length_rx_terminal_frames(self):
+        output = []
+        length = self.rx_terminal_config.fixed_length
+
+        while len(self.rx_terminal_pending) >= length:
+            output.append(self.format_rx_terminal_line(bytes(self.rx_terminal_pending[:length])))
+            del self.rx_terminal_pending[:length]
+
+        return "".join(output)
+
+    def flush_rx_terminal_pending(self):
+        if not self.rx_terminal_pending:
+            return
+
+        self.rx_terminal_flush_timer.stop()
+        text = self.format_rx_terminal_line(bytes(self.rx_terminal_pending))
+        self.rx_terminal_pending.clear()
+        self.append_terminal_text(text)
+
+    def format_rx_terminal_line(self, raw_rx):
+        if self.rx_terminal_config.display_mode == RX_TERMINAL_DISPLAY_MODES.ASCII_HEX:
+            return f"ASCII: {self.format_rx_ascii(raw_rx, preserve_layout=False)} | HEX: {self.format_rx_hex(raw_rx)}\n"
+
+        if self.rx_terminal_config.display_mode == RX_TERMINAL_DISPLAY_MODES.HEX:
+            return f"HEX: {self.format_rx_hex(raw_rx)}\n"
+
+        if self.rx_terminal_config.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+            return f"{self.format_rx_ascii(raw_rx, preserve_layout=True)}\n"
+
+        return self.format_rx_ascii(raw_rx, preserve_layout=True)
+
+    def format_rx_ascii(self, raw_rx, preserve_layout):
+        text_parts = []
+        for value in raw_rx:
+            if 0x20 <= value <= 0x7E:
+                text_parts.append(chr(value))
+            elif preserve_layout and value in (0x09, 0x0A, 0x0D):
+                text_parts.append(chr(value))
+            else:
+                text_parts.append(ASCII_CONTROL_LABELS.get(value, f"[0x{value:02X}]"))
+        return "".join(text_parts)
+
+    def format_rx_hex(self, raw_rx):
+        return raw_rx.hex(" ").upper()
 
 # ========================================================
 # ========================================================
