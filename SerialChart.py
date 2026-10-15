@@ -306,14 +306,15 @@ class SerialPlot:
         self.action_com_setting.setToolTip("COM Port Settings")
         self.action_plot.setToolTip("Show Plot")
         self.update_rx_display_mode_action()
-        self.action_clear.setToolTip("Clear")
+        self.action_clear.setToolTip("Clear Terminal")
         self.action_close.setToolTip("Close Application")
-        self.action_clear.setEnabled(False)
+        self.action_clear.setEnabled(True)
 
         self.action_connect_toggle.triggered.connect(self.toggle_serial_connection)
         self.action_com_setting.triggered.connect(self.open_port_settings_dialog)
         self.action_plot.triggered.connect(self.show_plot_window)
         self.action_rx_display_mode.triggered.connect(self.cycle_rx_display_mode)
+        self.action_clear.triggered.connect(self.clear_terminal)
         self.action_close.triggered.connect(self.close_application)
 
         self.main_toolbar.addAction(self.action_connect_toggle)
@@ -582,6 +583,11 @@ class SerialPlot:
                 self.rx_terminal_flush_timer.start(self.rx_terminal_config.idle_timeout_ms)
         else:
             self.rx_terminal_flush_timer.stop()
+
+    def clear_terminal(self):
+        self.rx_terminal_flush_timer.stop()
+        self.rx_terminal_pending.clear()
+        self.rx_terminal.clear()
 
     def append_terminal_text(self, text):
         cursor = self.rx_terminal.textCursor()
