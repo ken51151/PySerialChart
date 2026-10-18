@@ -48,6 +48,7 @@ class SerialPlot:
         self.config = config if config is not None else AppConfig()
         # 初始化 Qt Window
         self.app = QtWidgets.QApplication(sys.argv)
+        self.app.setWindowIcon(QtGui.QIcon(str(ICON_DIR / "serialchart_app.ico")))
         font = self.app.font()
         font.setFamily(UI_FONT_FAMILY)
         if font.pointSize() > 0:

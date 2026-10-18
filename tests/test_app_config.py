@@ -63,6 +63,13 @@ class MainWindowConfigTests(unittest.TestCase):
         self.assertIs(window.config.terminal, terminal)
         self.assertEqual(window.format_rx_terminal_line(b"A"), "HEX: 41\n")
 
+    def test_application_icon_is_inherited_by_windows(self):
+        icon = self.window.app.windowIcon()
+        self.assertFalse(icon.isNull())
+        self.assertFalse(icon.pixmap(32, 32).isNull())
+        self.assertEqual(self.window.main_win.windowIcon().cacheKey(), icon.cacheKey())
+        self.assertEqual(self.window.plot_window.windowIcon().cacheKey(), icon.cacheKey())
+
     def test_reconnect_uses_latest_config(self):
         window = SerialPlot.__new__(SerialPlot)
         window.config = AppConfig()
