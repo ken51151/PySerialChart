@@ -300,6 +300,7 @@ class SerialRxWorker(QtCore.QObject):
 # ========================================================
 # ========================================================
 class SerialRxController(QtCore.QObject):
+    stopped = QtCore.pyqtSignal()
     raw_received = QtCore.pyqtSignal(bytes)
     plot_batch_ready = QtCore.pyqtSignal(object)
     failed = QtCore.pyqtSignal(str)
@@ -365,4 +366,5 @@ class SerialRxController(QtCore.QObject):
     def clear_worker(self):
         self.thread = None
         self.worker = None
+        self.stopped.emit()
 # ========================================================

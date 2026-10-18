@@ -4,96 +4,30 @@ import sys
 from pathlib import Path
 from dataclasses import replace
 from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
-from enum import IntEnum
-from serial_comm import SerialCommConfig, apply_serial_config, create_serial_port
+from app_config import AppConfig
+from serial_comm import apply_serial_config, create_serial_port
 from port_settings_dialog import PortSettingsDialog
 from plot_window import PlotWindow
+from plot_settings_dialog import PlotSettingsDialog
 from rx_terminal_config import (
-    RxTerminalConfig,
     RxTerminalDisplayMode as RX_TERMINAL_DISPLAY_MODES,
     RxTerminalFrameMode as RX_TERMINAL_FRAME_MODES,
 )
 from rx_terminal_settings_dialog import RxTerminalSettingsDialog
 from serial_tx import (
-    DEFAULT_TX_CONFIG,
     TX_WRITE_TIMEOUT,
-    TxConfig,
     TxHistoryComboBox,
     TxController,
 )
-from serial_rx import RxParserConfig, RxPlotParser, SerialRxController
+from serial_rx import RxPlotParser, SerialRxController
 
-DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
 WINDOWS_TITLE = 'SerialChart'
 VERSION_MAJOR = 0
 VERSION_MINOR = 0
 VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
 ICON_DIR = Path(__file__).resolve().parent / "assets" / "icons"
 
-# ===== Serial 設定 =====
-PORT = "COM6"
-BAUD = 115200
-
-# ===== 圖表/接收模式設定 =====
-MAX_POINTS = 50000              # curve ring buffer size
-MAX_LINES = 10                  # max curve (only multi line mode)
-UPDATE_INTERVAL = 30            # update interval [ms]
-
-# @@@@@ 資料分段方式, 特定資料 or 固定長度
-class SEP_MODES(IntEnum):
-    CUSTOM_END = 1          # 特定資料分段, 常用在ASCII格式, 可搭配binary使用，但注意數值可能跟結尾符相撞
-    LENGTH = 2              # 固定長度分段, 常用在binary格式
-SEP_MODE = SEP_MODES.CUSTOM_END
-
-# @@@@@ 線段模式
-class LINE_MODES(IntEnum):
-    SINGLE_LINE = 1         # 單線段模式, 通常無冗餘資料, 效率上最高
-    MULTI_LINE_ASCII = 2    # 多線段模式, 會將各封包再次分析在匹配到各線段, ASCII資料格式為 "<name> = <value>", 最多10條
-LINE_MODE = LINE_MODES.MULTI_LINE_ASCII
-colors = ['y', 'g', 'r', 'c', 'm', 'w', 'b', (255,165,0), (128,0,128), (0,255,127)]
-
-# @@@@@ 數值處理方式, ASCII or binary
-class VALUE_MODES(IntEnum):
-    # ASCII
-    ASCII_INT = 1           # ASCII interger
-    ASCII_FLOAT = 2         # ASCII float
-    # binary with Little-endian
-    BIN_U8 = 10
-    BIN_I8 = 11
-    BIN_U16_LE = 12
-    BIN_I16_LE = 13
-    BIN_U32_LE = 14
-    BIN_I32_LE = 15
-    BIN_U64_LE = 16
-    BIN_I64_LE = 17
-    # binary with big-endian
-    BIN_U16_BE = 20
-    BIN_I16_BE = 21
-    BIN_U32_BE = 22
-    BIN_I32_BE = 23
-    BIN_U64_BE = 24
-    BIN_I64_BE = 25
-    # binary float/double (IEEE 754)
-    BIN_FLOAT  = 40
-    BIN_DOUBLE = 41
-VALUE_MODE = VALUE_MODES.ASCII_INT
-
-# @@@@@ 特定資料分段設定
-ASCII_CR = "\r"             # CR: 0x0D, Carriage Return
-ASCII_LF = "\n"             # LF: 0x0A, Line Feed
-ASCII_CRLR = "\r\n"         # CRLF: [0D,0A]
-CUSTOM_END = ASCII_LF       # 僅在CUSTOM_END模式下有效, 特定資料進行分段
-
-# @@@@@ 固定長度分段設定
-LEN_END = 5                 # 僅在LENGTH模式下有效
-
-# @@@@@ General Setting
-VAL_OFFSET = 0              # 數值分段後的固定位移, 除了MULTI_LINE_ASCII以外的所有模式都會受影響, 不會檢查是否溢出
-SEP = CUSTOM_END.encode()   # 預先計算分隔符避免即時運算的花費
-
-
 # @@@@@ UI component
-X_FOLLOW_WIDTH_DEFAULT = 2000   # default X width while following latest data
 UI_FONT_FAMILY = "Microsoft JhengHei UI"
 UI_FONT_POINT_DELTA = 2
 RX_TERMINAL_FONT_FAMILY = "Cascadia Mono"
@@ -108,31 +42,10 @@ ASCII_CONTROL_NAMES = (
 ASCII_CONTROL_LABELS = {value: f"[{name}]" for value, name in enumerate(ASCII_CONTROL_NAMES)}
 ASCII_CONTROL_LABELS[0x7F] = "[DEL]"
 
-# --------------------------------------------------------
-# table for value mode
-VALUE_CONFIG_TABLE = {
-    VALUE_MODES.ASCII_INT:  ('ASCII', int,   4),    # ASCII mode
-    VALUE_MODES.ASCII_FLOAT:('ASCII', float, 4),
-	VALUE_MODES.BIN_U8:     ('BIN', '<B',  1),    # binary mode
-    VALUE_MODES.BIN_I8:     ('BIN', '<b',  1),
-    VALUE_MODES.BIN_U16_LE: ('BIN', '<H',  2),
-    VALUE_MODES.BIN_I16_LE: ('BIN', '<h',  2),
-    VALUE_MODES.BIN_U32_LE: ('BIN', '<I',  4),
-    VALUE_MODES.BIN_I32_LE: ('BIN', '<i',  4),
-    VALUE_MODES.BIN_U64_LE: ('BIN', '<Q',  8),
-    VALUE_MODES.BIN_I64_LE: ('BIN', '<q',  8),
-    VALUE_MODES.BIN_U16_BE: ('BIN', '>H',  2),
-    VALUE_MODES.BIN_I16_BE: ('BIN', '>h',  2),
-    VALUE_MODES.BIN_U32_BE: ('BIN', '>I',  4),
-    VALUE_MODES.BIN_I32_BE: ('BIN', '>i',  4),
-    VALUE_MODES.BIN_U64_BE: ('BIN', '>Q',  8),
-    VALUE_MODES.BIN_I64_BE: ('BIN', '>q',  8),
-    VALUE_MODES.BIN_FLOAT:  ('BIN', '<f',  4),
-    VALUE_MODES.BIN_DOUBLE: ('BIN', '<d',  8),
-}
 # ========================================================
 class SerialPlot:
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config if config is not None else AppConfig()
         # 初始化 Qt Window
         self.app = QtWidgets.QApplication(sys.argv)
         font = self.app.font()
@@ -149,9 +62,6 @@ class SerialPlot:
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
-        self.comm_config = self.create_comm_config()
-        self.tx_config = self.create_tx_config()
-        self.rx_terminal_config = RxTerminalConfig()
         self.rx_terminal_pending = bytearray()
    
         # Toolbar on top
@@ -167,7 +77,7 @@ class SerialPlot:
         self.tx_input.lineEdit().returnPressed.connect(self.send_tx_input)
         self.combo_tx_line_end = QtWidgets.QComboBox()
         self.combo_tx_line_end.setFixedSize(90, 30)
-        self.combo_tx_line_end.addItems(self.tx_config.line_endings.keys())
+        self.combo_tx_line_end.addItems(self.config.tx.line_endings.keys())
         self.combo_tx_line_end.setCurrentText('LF (\\n)')
         self.btn_send = QtWidgets.QPushButton("&Send")
         self.btn_send.setFixedSize(80, 30)
@@ -203,60 +113,44 @@ class SerialPlot:
 
         # others
         print(f"{WINDOWS_TITLE} v{VERSION}")
-        info = ""
-        offset = VAL_OFFSET
-        self.ser = create_serial_port(self.comm_config)
-        if   SEP_MODE == SEP_MODES.CUSTOM_END:          self.rx_sep_mode = "custom_end"         ; info += "特定資料分段模式"
-        elif SEP_MODE == SEP_MODES.LENGTH:              self.rx_sep_mode = "length"             ; info += "固定長度分段模式"
-        else:                                           print('ERROR, invalid SEP_MODE!!!')     ; info += "!!! 模式錯誤 !!!"
-
-        if   LINE_MODE == LINE_MODES.SINGLE_LINE:
-            info += ", 單線段模式"
-            self.rx_line_mode = "single"
-        elif LINE_MODE == LINE_MODES.MULTI_LINE_ASCII:
-            info += ", 多線段ASCII模式"
-            self.rx_line_mode = "multi_ascii"
-        else:
-            info += "!!! 線段設定錯誤 !!!"  
-            print('ERROR, invalid LINE_MODE!!!')
-        
-        if VALUE_MODE in VALUE_CONFIG_TABLE:
-            self.rx_value_type, self.rx_value_fmt, self.rx_value_size = VALUE_CONFIG_TABLE[VALUE_MODE]
-            if self.rx_value_type == 'ASCII':
-                info += " + {}, size={}, offset={}, SEP=[{}]".format(self.rx_value_type, self.rx_value_size, offset, SEP.hex(' ').upper())
-            else:
-                info += " + {}, size={}, offset={}, Length={}".format(self.rx_value_type, self.rx_value_size, offset, LEN_END)
-        else:
-            print('ERROR, invalid VALUE_MODE!!!')
-            self.rx_value_type, self.rx_value_fmt, self.rx_value_size = ('ASCII', int, 4)
-        print(info)
+        self.ser = create_serial_port(self.config.comm)
+        plot_config = self.config.plot
+        parser_config = self.create_rx_parser_config()
+        print(
+            f"{parser_config.sep_mode}, {parser_config.line_mode}, "
+            f"{parser_config.value_type}, size={parser_config.value_size}, "
+            f"offset={parser_config.offset}, SEP=[{parser_config.sep.hex(' ').upper()}], "
+            f"Length={parser_config.len_end}"
+        )
 
         self.plot_window = PlotWindow(
-            MAX_POINTS,
-            MAX_LINES,
-            X_FOLLOW_WIDTH_DEFAULT,
-            self.rx_line_mode,
-            colors,
-            DEBUG_LINE_ENABLE,
+            plot_config.max_points,
+            plot_config.max_lines,
+            plot_config.x_follow_width,
+            parser_config.line_mode,
+            plot_config.colors,
+            plot_config.debug_line_enabled,
         )
         self.plot_window.hidden.connect(self.plot_window_hidden)
         self.plot_window.clear_requested.connect(self.reset_plot_parser)
         self.plot_window.plot_running_changed.connect(self.set_plot_running)
+        self.plot_window.settings_requested.connect(self.open_plot_settings_dialog)
 
         # update timer (validation only; RX uses SerialRxController)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
 
         # rx controller
-        self.rx_controller = SerialRxController(UPDATE_INTERVAL)
+        self.rx_controller = SerialRxController(self.config.rx_interval_ms)
         # PlotWindow owns curve buffers; the main window only routes parsed plot batches.
-        self.rx_controller.plot_batch_ready.connect(self.plot_window.update_plot_batch)
+        self.rx_controller.plot_batch_ready.connect(self.handle_plot_batch)
+        self.rx_controller.stopped.connect(self.update_plot_settings_enabled)
         self.rx_controller.raw_received.connect(self.handle_terminal_raw_rx)
         self.rx_controller.failed.connect(self.rx_failed)
         self.rx_controller.set_terminal_enabled(True)
 
         # tx controller
-        self.tx_controller = TxController(self.tx_config)
+        self.tx_controller = TxController(self.config.tx)
         self.tx_controller.started.connect(self.tx_started)
         self.tx_controller.finished.connect(self.tx_finished)
         self.tx_controller.failed.connect(self.tx_failed)
@@ -291,7 +185,7 @@ class SerialPlot:
             QtGui.QIcon(str(ICON_DIR / "plot.svg")), "Plot", self.main_win
         )
         self.action_rx_display_mode = QtWidgets.QAction(
-            self.rx_display_mode_icons[self.rx_terminal_config.display_mode],
+            self.rx_display_mode_icons[self.config.terminal.display_mode],
             "RxMode",
             self.main_win,
         )
@@ -357,11 +251,11 @@ class SerialPlot:
 # ========================================================
     def set_toolbar_button_widths(self):
         button_widths = {
-            self.action_connect_toggle: 100,
-            self.action_com_setting: 80,
-            self.action_plot: 80,
-            self.action_clear: 80,
-            self.action_close: 80,
+            self.action_connect_toggle: 120,
+            self.action_com_setting: 90,
+            self.action_plot: 90,
+            self.action_clear: 90,
+            self.action_close: 90,
         }
 
         for action, width in button_widths.items():
@@ -388,7 +282,7 @@ class SerialPlot:
 
 # ========================================================
     def rx_display_mode_label(self, mode=None):
-        mode = self.rx_terminal_config.display_mode if mode is None else mode
+        mode = self.config.terminal.display_mode if mode is None else mode
         if mode == RX_TERMINAL_DISPLAY_MODES.ASCII_HEX:
             return "ASCII+HEX"
         if mode == RX_TERMINAL_DISPLAY_MODES.HEX:
@@ -400,23 +294,23 @@ class SerialPlot:
         label = self.rx_display_mode_label()
         self.action_rx_display_mode.setText("RxMode")
         self.action_rx_display_mode.setIcon(
-            self.rx_display_mode_icons[self.rx_terminal_config.display_mode]
+            self.rx_display_mode_icons[self.config.terminal.display_mode]
         )
         self.action_rx_display_mode.setToolTip(f"RX Display: {label}, {self.rx_terminal_frame_label()}")
 
 # ========================================================
     def update_rx_terminal_menu_actions(self):
-        self.rx_display_actions[self.rx_terminal_config.display_mode].setChecked(True)
+        self.rx_display_actions[self.config.terminal.display_mode].setChecked(True)
 
 # ========================================================
     def cycle_rx_display_mode(self):
-        next_value = (int(self.rx_terminal_config.display_mode) + 1) % len(RX_TERMINAL_DISPLAY_MODES)
+        next_value = (int(self.config.terminal.display_mode) + 1) % len(RX_TERMINAL_DISPLAY_MODES)
         self.set_rx_display_mode(RX_TERMINAL_DISPLAY_MODES(next_value))
 
 # ========================================================
     def set_rx_display_mode(self, mode):
         self.flush_rx_terminal_pending()
-        self.rx_terminal_config = replace(self.rx_terminal_config, display_mode=mode)
+        self.config.terminal = replace(self.config.terminal, display_mode=mode)
         self.update_rx_display_mode_action()
         self.update_rx_terminal_menu_actions()
         self.tx_status.setText(f"RX display: {self.rx_display_mode_label()}")
@@ -424,7 +318,7 @@ class SerialPlot:
 # ========================================================
     def apply_rx_terminal_config(self, config):
         self.flush_rx_terminal_pending()
-        self.rx_terminal_config = config
+        self.config.terminal = config
         self.update_rx_display_mode_action()
         self.update_rx_terminal_menu_actions()
         self.tx_status.setText(f"RX frame: {self.rx_terminal_frame_label()}")
@@ -432,7 +326,7 @@ class SerialPlot:
 # ========================================================
     def open_rx_terminal_settings_dialog(self):
         dialog = RxTerminalSettingsDialog(
-            self.rx_terminal_config,
+            self.config.terminal,
             len(self.rx_terminal_pending),
             self.main_win,
         )
@@ -441,9 +335,9 @@ class SerialPlot:
 
 # ========================================================
     def rx_terminal_frame_label(self):
-        if self.rx_terminal_config.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
-            return f"Fixed {self.rx_terminal_config.fixed_length}"
-        return f"Ending {self.rx_terminal_config.terminator_name}"
+        if self.config.terminal.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+            return f"Fixed {self.config.terminal.fixed_length}"
+        return f"Ending {self.config.terminal.terminator_name}"
 
 # ========================================================
     def show_plot_window(self):
@@ -452,6 +346,40 @@ class SerialPlot:
         self.plot_window.show()
         self.plot_window.raise_()
         self.plot_window.activateWindow()
+
+    def can_edit_plot_settings(self):
+        # Wait for controller cleanup as well as COM close; stop() has a bounded wait.
+        return not self.ser.is_open and self.rx_controller.thread is None
+
+    def update_plot_settings_enabled(self):
+        self.plot_window.set_settings_enabled(self.can_edit_plot_settings())
+
+    def open_plot_settings_dialog(self):
+        if not self.can_edit_plot_settings():
+            return
+        dialog = PlotSettingsDialog(self.config.plot, self.plot_window)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_plot_config(dialog.get_config())
+
+    def apply_plot_config(self, config):
+        if not self.can_edit_plot_settings():
+            return False
+        try:
+            config.validate()
+        except ValueError as error:
+            self.tx_status.setText(str(error))
+            return False
+        if config == self.config.plot:
+            return True
+        self.plot_window.apply_config(config)
+        self.config.plot = config
+        self.tx_status.setText("Plot settings applied; existing lines preserved")
+        return True
+
+    def handle_plot_batch(self, batch):
+        # Discard queued batches from a closed connection.
+        if self.ser.is_open:
+            self.plot_window.update_plot_batch(batch)
 
 # ========================================================
     def plot_window_hidden(self):
@@ -484,21 +412,11 @@ class SerialPlot:
         event.accept()
 
 # ========================================================
-    def create_comm_config(self):
-        return SerialCommConfig(
-            port=PORT,
-            baudrate=BAUD,
-            timeout=0.1,
-            write_timeout=TX_WRITE_TIMEOUT,
-        )
-
-# ========================================================
     def apply_comm_config(self, config):
         if self.ser.is_open:
             self.tx_status.setText("Close COM before changing settings")
             return False
 
-        self.comm_config = config
         try:
             apply_serial_config(self.ser, config)
         except Exception as e:
@@ -506,6 +424,7 @@ class SerialPlot:
             self.tx_status.setText("COM config error")
             return False
 
+        self.config.comm = config
         self.tx_status.setText(f"{config.port}, {config.baudrate}")
         return True
 
@@ -515,26 +434,19 @@ class SerialPlot:
             self.tx_status.setText("Close COM before changing settings")
             return
 
-        dialog = PortSettingsDialog(self.comm_config, self.main_win)
+        dialog = PortSettingsDialog(self.config.comm, self.main_win)
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             self.apply_comm_config(dialog.get_config())
 
 # ========================================================
     def send_tx_input(self):
         text = self.tx_input.currentText()
-        line_end = self.tx_config.line_endings[self.combo_tx_line_end.currentText()]
+        line_end = self.config.tx.line_endings[self.combo_tx_line_end.currentText()]
         self.tx_controller.send(self.ser, text, line_end)
 
 # ========================================================
-    def create_tx_config(self):
-        return TxConfig(
-            line_endings=DEFAULT_TX_CONFIG.line_endings,
-            prefix_enabled=DEFAULT_TX_CONFIG.prefix_enabled,
-        )
-
-# ========================================================
     def apply_tx_config(self, config):
-        self.tx_config = config
+        self.config.tx = config
         current_line_end = self.combo_tx_line_end.currentText()
         self.combo_tx_line_end.clear()
         self.combo_tx_line_end.addItems(config.line_endings.keys())
@@ -577,10 +489,10 @@ class SerialPlot:
             self.append_terminal_text(text)
 
         if self.rx_terminal_pending:
-            if len(self.rx_terminal_pending) >= self.rx_terminal_config.pending_limit:
+            if len(self.rx_terminal_pending) >= self.config.terminal.pending_limit:
                 self.flush_rx_terminal_pending()
             else:
-                self.rx_terminal_flush_timer.start(self.rx_terminal_config.idle_timeout_ms)
+                self.rx_terminal_flush_timer.start(self.config.terminal.idle_timeout_ms)
         else:
             self.rx_terminal_flush_timer.stop()
 
@@ -597,13 +509,13 @@ class SerialPlot:
         self.rx_terminal.ensureCursorVisible()
 
     def take_complete_rx_terminal_frames(self):
-        if self.rx_terminal_config.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+        if self.config.terminal.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
             return self.take_fixed_length_rx_terminal_frames()
         return self.take_terminator_rx_terminal_frames()
 
     def take_terminator_rx_terminal_frames(self):
         output = []
-        terminator = self.rx_terminal_config.terminator
+        terminator = self.config.terminal.terminator
         terminator_len = len(terminator)
 
         while True:
@@ -619,7 +531,7 @@ class SerialPlot:
 
     def take_fixed_length_rx_terminal_frames(self):
         output = []
-        length = self.rx_terminal_config.fixed_length
+        length = self.config.terminal.fixed_length
 
         while len(self.rx_terminal_pending) >= length:
             output.append(self.format_rx_terminal_line(bytes(self.rx_terminal_pending[:length])))
@@ -637,13 +549,13 @@ class SerialPlot:
         self.append_terminal_text(text)
 
     def format_rx_terminal_line(self, raw_rx):
-        if self.rx_terminal_config.display_mode == RX_TERMINAL_DISPLAY_MODES.ASCII_HEX:
+        if self.config.terminal.display_mode == RX_TERMINAL_DISPLAY_MODES.ASCII_HEX:
             return f"ASCII: {self.format_rx_ascii(raw_rx, preserve_layout=False)} | HEX: {self.format_rx_hex(raw_rx)}\n"
 
-        if self.rx_terminal_config.display_mode == RX_TERMINAL_DISPLAY_MODES.HEX:
+        if self.config.terminal.display_mode == RX_TERMINAL_DISPLAY_MODES.HEX:
             return f"HEX: {self.format_rx_hex(raw_rx)}\n"
 
-        if self.rx_terminal_config.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+        if self.config.terminal.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
             return f"{self.format_rx_ascii(raw_rx, preserve_layout=True)}\n"
 
         return self.format_rx_ascii(raw_rx, preserve_layout=True)
@@ -679,17 +591,7 @@ class SerialPlot:
         )
 # ========================================================
     def create_rx_parser_config(self):
-        # Future settings UI can create the same snapshot and pass it to rx_controller.apply_plot_config().
-        return RxParserConfig(
-            self.rx_sep_mode,
-            self.rx_line_mode,
-            self.rx_value_type,
-            self.rx_value_fmt,
-            self.rx_value_size,
-            SEP,
-            LEN_END,
-            VAL_OFFSET,
-        )
+        return self.config.plot.to_parser_config()
 # ========================================================
     def rx_failed(self, message):
         print(message)
@@ -703,13 +605,16 @@ class SerialPlot:
     def connect_serial(self):
         if self.ser.is_open:
             return
+        if self.rx_controller.thread is not None:
+            self.tx_status.setText("Waiting for RX to stop")
+            return
 
         self.plot_window.clear_data()
-        if DEBUG_LINE_ENABLE:
-            self.timer.start(UPDATE_INTERVAL)
+        if self.config.plot.debug_line_enabled:
+            self.timer.start(self.config.rx_interval_ms)
 
         try:
-            apply_serial_config(self.ser, self.comm_config)
+            apply_serial_config(self.ser, self.config.comm)
             self.ser.open()
             self.ser.reset_input_buffer()
             self.rx_controller.start(self.ser, self.create_rx_plot_parser())
@@ -735,6 +640,7 @@ class SerialPlot:
         self.combo_tx_line_end.setEnabled(connected)
         self.btn_send.setEnabled(connected)
         self.update_toolbar_actions(connected)
+        self.update_plot_settings_enabled()
         self.com_status_icon.setText("🟢" if connected else "🔴")
         if status_text is None:
             status_text = "COM opened" if connected else "COM closed"

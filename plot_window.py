@@ -14,6 +14,7 @@ class PlotWindow(QtWidgets.QMainWindow):
     hidden = QtCore.pyqtSignal()
     clear_requested = QtCore.pyqtSignal()
     plot_running_changed = QtCore.pyqtSignal(bool)
+    settings_requested = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -88,6 +89,13 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.btn_clear = QtWidgets.QPushButton("&Clear")
         self.btn_clear.setFixedSize(80, 30)
         self.btn_clear.clicked.connect(self.clear_data)
+        self.btn_settings = QtWidgets.QToolButton()
+        self.btn_settings.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        self.btn_settings.setText("Settings")
+        self.btn_settings.setFixedSize(100, 30)
+        self.btn_settings.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.btn_settings.setToolTip("Plot Settings")
+        self.btn_settings.clicked.connect(lambda: self.settings_requested.emit())
 
         self.controls_layout.addWidget(self.btn_plot_run)
         self.controls_layout.addWidget(self.btn_cursor)
@@ -96,6 +104,7 @@ class PlotWindow(QtWidgets.QMainWindow):
         self.controls_layout.addWidget(self.btn_followX)
         self.controls_layout.addWidget(self.spin_x_width)
         self.controls_layout.addWidget(self.btn_clear)
+        self.controls_layout.addWidget(self.btn_settings)
         self.controls_layout.addStretch()
         self.layout.addLayout(self.controls_layout)
 
@@ -120,13 +129,15 @@ class PlotWindow(QtWidgets.QMainWindow):
 
     # ========================================================
     def _init_curves(self):
-        if self.line_mode == "single":
+        if self.line_mode == "single" and "default" not in self.curves_data:
             buf = np.full(self.max_points, np.nan)
-            curve = self.plot.plot(pen=self.colors[0])
+            curve = self.plot.plot(pen=self.colors[0], name="default")
             curve.setData(buf, connect="finite")
             self.curves_data["default"] = {"buf": buf, "idx": 0, "curve": curve}
-        elif self.line_mode == "multi_ascii":
+        elif self.line_mode == "multi_ascii" and self.plot.legend is None:
             self.plot.addLegend()
+            for name, info in self.curves_data.items():
+                self.plot.legend.addItem(info["curve"], name)
 
     # ========================================================
     def closeEvent(self, event):
@@ -135,6 +146,35 @@ class PlotWindow(QtWidgets.QMainWindow):
             self.set_plot_running(False)
         self.hide()
         self.hidden.emit()
+
+    def set_settings_enabled(self, enabled):
+        self.btn_settings.setEnabled(enabled)
+        self.btn_settings.setToolTip("Plot Settings" if enabled else "Close COM and wait for RX to stop before changing plot settings.")
+
+    def apply_config(self, config):
+        config.validate()
+        parser_config = config.to_parser_config()
+        self.set_plot_running(False)
+        # Resize storage only when needed, retaining curve objects and newest samples.
+        if config.max_points != self.max_points:
+            for info in self.curves_data.values():
+                count = min(info["idx"], config.max_points)
+                buf = np.full(config.max_points, np.nan)
+                if count:
+                    buf[:count] = info["buf"][info["idx"] - count:info["idx"]]
+                info["buf"] = buf
+                info["idx"] = count
+                info["curve"].setData(buf[:count], connect="finite")
+        self.max_points = config.max_points
+        self.max_lines = config.max_lines
+        self.x_follow_width_default = config.x_follow_width
+        self.line_mode = parser_config.line_mode
+        self.colors = config.colors
+        self.debug_line_enabled = config.debug_line_enabled
+        self.max_current_idx = max((info["idx"] for info in self.curves_data.values()), default=0)
+        self.spin_x_width.setMaximum(config.max_points)
+        self._init_curves()
+        self.update_x_range()
 
     # ========================================================
     def is_plot_running(self):
@@ -162,8 +202,8 @@ class PlotWindow(QtWidgets.QMainWindow):
                 return
 
             self._append_curve_values(curve_info, values)
-            self.max_current_idx = curve_info["idx"]
-            v_len = self.max_current_idx
+            self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
+            v_len = curve_info["idx"]
             curve_info["curve"].setData(curve_info["buf"][:v_len], connect="finite")
             self.update_x_range()
 
