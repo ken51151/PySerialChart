@@ -1,14 +1,17 @@
 import os
 import unittest
 from dataclasses import replace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from app_config import AppConfig
 from plot_config import LINE_MODES, SEP_MODES, VALUE_MODES
 from rx_terminal_config import RxTerminalDisplayMode
-from SerialChart import SerialPlot
+from SerialChart import SerialPlot, VERSION
+from about_dialog import AboutDialog, RESOURCE_DIR, REPOSITORY_URL
 from plot_config import PlotConfig
 from plot_settings_dialog import PlotSettingsDialog
 from pyqtgraph.Qt import QtCore, QtWidgets
@@ -62,6 +65,102 @@ class MainWindowConfigTests(unittest.TestCase):
         window.apply_rx_terminal_config(terminal)
         self.assertIs(window.config.terminal, terminal)
         self.assertEqual(window.format_rx_terminal_line(b"A"), "HEX: 41\n")
+
+    def test_about_and_offline_licenses(self):
+        dialog = AboutDialog("SerialChart", VERSION, self.window.main_win)
+        self.assertIn(f"Version {VERSION}", dialog.title_label.text())
+        self.assertIn("ken51151", dialog.about_text.text())
+        self.assertIn("GPL-3.0-only", dialog.about_text.text())
+        self.assertIn(REPOSITORY_URL, dialog.about_text.text())
+        self.assertIn("WITHOUT ANY WARRANTY", dialog.about_text.text())
+        self.assertTrue(dialog.license_text.isReadOnly())
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", dialog.license_text.toPlainText())
+        self.assertIn("END OF TERMS AND CONDITIONS", dialog.license_text.toPlainText())
+        dialog.license_button.click()
+        self.assertEqual(dialog.tabs.currentIndex(), 1)
+        self.assertGreater(dialog.license_selector.count(), 10)
+        for index in range(dialog.license_selector.count()):
+            dialog.license_selector.setCurrentIndex(index)
+            self.assertTrue(dialog.license_text.toPlainText())
+            self.assertNotIn("Unable to read license document", dialog.license_text.toPlainText())
+        notice = (RESOURCE_DIR / "COPYRIGHT.txt").read_text(encoding="utf-8")
+        self.assertIn("GPL-3.0-only", notice)
+        self.assertNotIn("or any later version", notice)
+        dialog.reject()
+
+    def test_about_action_and_missing_document(self):
+        # Opening legal information must not change COM/plot settings or start any network request.
+        before = self.window.config.plot
+        QtCore.QTimer.singleShot(0, lambda: QtWidgets.QApplication.activeModalWidget().reject())
+        self.window.action_about.trigger()
+        self.assertIs(self.window.config.plot, before)
+        self.assertTrue(self.window.action_about.isEnabled())
+        self.assertIs(self.window.main_toolbar.actions()[-1], self.window.action_close)
+        with TemporaryDirectory() as directory, patch("about_dialog.RESOURCE_DIR", Path(directory)):
+            dialog = AboutDialog("SerialChart", VERSION)
+            dialog.license_button.click()
+            self.assertIn("Unable to read license document: LICENSE.txt", dialog.license_text.toPlainText())
+            dialog.reject()
+
+    def test_menubar_actions_and_shared_rx_mode(self):
+        window = self.window
+        self.assertNotIn(window.action_about, window.main_toolbar.actions())
+        self.assertEqual(window.help_menu.actions(), [window.action_about, window.action_licenses])
+        self.assertIn(window.action_close, window.file_menu.actions())
+        self.assertIn(window.action_clear, window.file_menu.actions())
+        self.assertIn(window.action_com_setting, window.connection_menu.actions())
+        self.assertIn(window.action_plot, window.plot_menu.actions())
+        self.assertIn(window.action_plot_settings, window.plot_menu.actions())
+        self.assertIn(window.action_rx_terminal_settings, window.rx_menu.actions())
+        self.assertEqual(window.action_com_setting.iconText(), "COM")
+        previous_mode = window.config.terminal.display_mode
+        try:
+            for mode, action in window.rx_display_actions.items():
+                self.assertIn(action, window.rx_mode_menu.actions())
+                self.assertIn(action, window.rx_display_menu.actions())
+                action.trigger()
+                self.assertEqual(window.config.terminal.display_mode, mode)
+                self.assertTrue(action.isChecked())
+        finally:
+            window.set_rx_display_mode(previous_mode)
+        with patch("SerialChart.AboutDialog") as dialog_class:
+            window.action_licenses.trigger()
+            dialog_class.return_value.tabs.setCurrentIndex.assert_called_once_with(1)
+            dialog_class.return_value.exec_.assert_called_once()
+        with patch("SerialChart.AboutDialog") as dialog_class:
+            window.action_about.trigger()
+            dialog_class.return_value.tabs.setCurrentIndex.assert_not_called()
+            dialog_class.return_value.exec_.assert_called_once()
+
+    def test_menubar_connection_and_plot_settings_states(self):
+        window = self.window
+        original_ser = window.ser
+        try:
+            window.ser = Mock(is_open=True)
+            window.set_connected_ui(True)
+            self.assertFalse(window.action_connect.isEnabled())
+            self.assertTrue(window.action_disconnect.isEnabled())
+            self.assertFalse(window.action_com_setting.isEnabled())
+            self.assertFalse(window.action_plot_settings.isEnabled())
+            self.assertTrue(window.action_clear.isEnabled())
+            self.assertTrue(window.action_rx_terminal_settings.isEnabled())
+            with patch.object(window, "disconnect_serial") as disconnect:
+                window.action_disconnect.trigger()
+                disconnect.assert_called_once_with()
+            window.ser.is_open = False
+            window.rx_controller.thread = Mock()
+            window.set_connected_ui(False)
+            self.assertTrue(window.action_connect.isEnabled())
+            self.assertFalse(window.action_disconnect.isEnabled())
+            self.assertTrue(window.action_com_setting.isEnabled())
+            self.assertFalse(window.action_plot_settings.isEnabled())
+            window.rx_controller.clear_worker()
+            self.assertTrue(window.action_plot_settings.isEnabled())
+            self.assertTrue(window.plot_window.btn_settings.isEnabled())
+        finally:
+            window.ser = original_ser
+            window.rx_controller.thread = None
+            window.set_connected_ui(original_ser.is_open)
 
     def test_application_icon_is_inherited_by_windows(self):
         icon = self.window.app.windowIcon()

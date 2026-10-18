@@ -9,6 +9,7 @@ from serial_comm import apply_serial_config, create_serial_port
 from port_settings_dialog import PortSettingsDialog
 from plot_window import PlotWindow
 from plot_settings_dialog import PlotSettingsDialog
+from about_dialog import AboutDialog
 from rx_terminal_config import (
     RxTerminalDisplayMode as RX_TERMINAL_DISPLAY_MODES,
     RxTerminalFrameMode as RX_TERMINAL_FRAME_MODES,
@@ -67,6 +68,7 @@ class SerialPlot:
    
         # Toolbar on top
         self.create_toolbar()
+        self.create_menubar()
 
         # 傳送控制區
         self.tx_layout = QtWidgets.QHBoxLayout()
@@ -196,7 +198,6 @@ class SerialPlot:
         self.action_close = QtWidgets.QAction(
             QtGui.QIcon(str(ICON_DIR / "close.svg")), "Close", self.main_win
         )
-
         self.action_connect_toggle.setToolTip("Disconnected")
         self.action_com_setting.setToolTip("COM Port Settings")
         self.action_plot.setToolTip("Show Plot")
@@ -220,6 +221,53 @@ class SerialPlot:
         self.main_toolbar.addSeparator()
         self.main_toolbar.addAction(self.action_close)
         self.set_toolbar_button_widths()
+
+    def create_menubar(self):
+        menu_bar = self.main_win.menuBar()
+        self.file_menu = menu_bar.addMenu("&File")
+        self.file_menu.addAction(self.action_clear)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_close)
+
+        self.connection_menu = menu_bar.addMenu("&Connection")
+        self.action_connect = QtWidgets.QAction(self.icon_connect, "Connect", self.main_win)
+        self.action_disconnect = QtWidgets.QAction(self.icon_disconnect, "Disconnect", self.main_win)
+        self.action_connect.triggered.connect(self.connect_serial)
+        # QAction's checked flag is not the optional disconnect status message.
+        self.action_disconnect.triggered.connect(lambda checked=False: self.disconnect_serial())
+        self.connection_menu.addAction(self.action_connect)
+        self.connection_menu.addAction(self.action_disconnect)
+        self.connection_menu.addSeparator()
+        self.action_com_setting.setText("COM Settings...")
+        self.action_com_setting.setIconText("COM")
+        self.connection_menu.addAction(self.action_com_setting)
+
+        self.plot_menu = menu_bar.addMenu("&Plot")
+        self.plot_menu.addAction(self.action_plot)
+        self.action_plot_settings = QtWidgets.QAction(
+            self.action_com_setting.icon(), "Plot Settings...", self.main_win,
+        )
+        self.action_plot_settings.triggered.connect(self.open_plot_settings_dialog)
+        self.plot_menu.addAction(self.action_plot_settings)
+
+        self.rx_menu = menu_bar.addMenu("&RX")
+        self.rx_mode_menu = self.rx_menu.addMenu("RX Mode")
+        for action in self.rx_display_actions.values():
+            self.rx_mode_menu.addAction(action)
+        self.rx_menu.addSeparator()
+        self.action_rx_terminal_settings.setText("RX Settings...")
+        self.rx_menu.addAction(self.action_rx_terminal_settings)
+
+        self.help_menu = menu_bar.addMenu("&Help")
+        self.action_about = QtWidgets.QAction(
+            self.main_win.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation),
+            "About...", self.main_win,
+        )
+        self.action_about.triggered.connect(self.open_about_dialog)
+        self.action_licenses = QtWidgets.QAction("Licenses...", self.main_win)
+        self.action_licenses.triggered.connect(lambda checked=False: self.open_about_dialog(show_licenses=True))
+        self.help_menu.addAction(self.action_about)
+        self.help_menu.addAction(self.action_licenses)
 
 # ========================================================
     def create_rx_display_tool_button(self):
@@ -280,6 +328,8 @@ class SerialPlot:
             self.action_connect_toggle.setToolTip("Disconnected")
 
         self.action_com_setting.setEnabled(not connected)
+        self.action_connect.setEnabled(not connected)
+        self.action_disconnect.setEnabled(connected)
 
 # ========================================================
     def rx_display_mode_label(self, mode=None):
@@ -353,7 +403,9 @@ class SerialPlot:
         return not self.ser.is_open and self.rx_controller.thread is None
 
     def update_plot_settings_enabled(self):
-        self.plot_window.set_settings_enabled(self.can_edit_plot_settings())
+        enabled = self.can_edit_plot_settings()
+        self.plot_window.set_settings_enabled(enabled)
+        self.action_plot_settings.setEnabled(enabled)
 
     def open_plot_settings_dialog(self):
         if not self.can_edit_plot_settings():
@@ -404,6 +456,12 @@ class SerialPlot:
 # ========================================================
     def close_application(self):
         self.main_win.close()
+
+    def open_about_dialog(self, show_licenses=False):
+        dialog = AboutDialog(WINDOWS_TITLE, VERSION, self.main_win)
+        if show_licenses:
+            dialog.tabs.setCurrentIndex(1)
+        dialog.exec_()
 
 # ========================================================
     def main_window_close_event(self, event):
