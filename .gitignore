@@ -3,6 +3,9 @@ __pycache__/
 *$py.class
 
 .venv/
+.venv-build/
+build/
+dist/
 venv/
 env/
 

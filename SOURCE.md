@@ -6,9 +6,11 @@ Project license: GPL-3.0-only (see COPYRIGHT.txt and LICENSE.txt).
 
 ## Current Status
 
-These documents prepare the source project for distribution. No binary release,
-version tag, source archive or reproducible packaging configuration is created
-by this change. The repository URL alone is not a version-matched source offer.
+These documents prepare the source project for distribution. Local Windows onedir
+builds are available through `packaging/build_release.py`; see packaging/README.md for pinned
+dependencies and build instructions. Creating a local build does not publish a
+release, version tag or matching source archive. The repository URL alone is not
+a version-matched source offer.
 
 ## Running the Source
 
