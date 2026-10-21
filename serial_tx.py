@@ -1,24 +1,38 @@
 import serial
+from dataclasses import dataclass
 from pyqtgraph.Qt import QtWidgets, QtCore
 
 # ========================================================
-HEX_TX_PREFIX = 'hex:'
-TX_ENCODING = 'utf-8'
+# Keep this at 0 for non-blocking writes. Non-zero values can make writes fail
+# with SerialTimeoutException when the paired COM port is not opened by another app.
 TX_WRITE_TIMEOUT = 0
-TX_TIMEOUT_STATUS = "TX timeout"
+TX_HISTORY_LIMIT = 50
 TX_LINE_ENDINGS = {
     'None': '',
     'LF (\\n)': '\n',
     'CR (\\r)': '\r',
     'CRLF': '\r\n',
 }
-TX_HISTORY_LIMIT = 50
+HEX_TX_PREFIX = 'hex:'
 
 # ========================================================
-def parse_tx_input(text, line_end):
-    if text.lower().startswith(HEX_TX_PREFIX):
+@dataclass(frozen=True)
+class TxConfig:
+    line_endings: dict
+    prefix_enabled: bool = True
+
+# ========================================================
+DEFAULT_TX_CONFIG = TxConfig(
+    line_endings=TX_LINE_ENDINGS,
+    prefix_enabled=True,
+)
+
+# ========================================================
+def parse_tx_input(text, line_end, config=DEFAULT_TX_CONFIG):
+    # Prefix mode means raw bytes; normal text keeps the selected line ending.
+    if config.prefix_enabled and text.lower().startswith(HEX_TX_PREFIX):
         return parse_hex_tx(text)
-    return (text + line_end).encode(TX_ENCODING), text, False
+    return (text + line_end).encode('ascii'), text, False       # encode with ASCII normally
 
 # ========================================================
 def parse_hex_tx(text):
@@ -49,6 +63,7 @@ class TxLineEdit(QtWidgets.QLineEdit):
         self.history_combo = history_combo
 
     def event(self, event):
+        # Qt normally treats Tab as focus navigation before keyPressEvent sees it.
         if event.type() == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Tab:
             self.history_combo.complete_from_history()
             return True
@@ -127,6 +142,7 @@ class TxHistoryComboBox(QtWidgets.QComboBox):
         if len(matches) == 1:
             completion = matches[0]
         else:
+            # Multiple matches behave like a terminal: complete only the shared prefix.
             completion = self.common_prefix(matches)
             self.showPopup()
 
@@ -193,7 +209,7 @@ class SerialTxWorker(QtCore.QObject):
         try:
             bytes_sent = self.ser.write(self.data)
         except serial.SerialTimeoutException as e:
-            self.failed.emit(TX_TIMEOUT_STATUS, f"Serial TX timeout: {e}", self.text)
+            self.failed.emit("TX Timeout", f"Serial TX timeout: {e}", self.text)
             return
         except (serial.SerialException, OSError) as e:
             self.failed.emit("TX failed", f"Serial TX error: {e}", self.text)
@@ -211,10 +227,15 @@ class TxController(QtCore.QObject):
     rejected = QtCore.pyqtSignal(str)
 
 # ========================================================
-    def __init__(self):
+    def __init__(self, config=DEFAULT_TX_CONFIG):
         super().__init__()
+        self.config = config
         self.thread = None
         self.worker = None
+
+# ========================================================
+    def apply_config(self, config):
+        self.config = config
 
 # ========================================================
     def is_busy(self):
@@ -231,7 +252,7 @@ class TxController(QtCore.QObject):
             return
 
         try:
-            data, tx_text, is_hex = parse_tx_input(text, line_end)
+            data, tx_text, is_hex = parse_tx_input(text, line_end, self.config)
         except ValueError as e:
             self.rejected.emit(str(e))
             return
@@ -240,6 +261,7 @@ class TxController(QtCore.QObject):
             self.rejected.emit("COM closed")
             return
 
+        # Serial writes run off the UI thread because some drivers can block inside write().
         self.thread = QtCore.QThread()
         self.worker = SerialTxWorker(ser, data, tx_text)
         self.worker.moveToThread(self.thread)

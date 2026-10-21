@@ -1,0 +1,23 @@
+SerialChart (PySerialChart)
+Copyright (C) 2026 ken51151
+SPDX-License-Identifier: GPL-3.0-only
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of version 3 of the GNU General Public License as
+published by the Free Software Foundation (version 3 only).
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program in LICENSE.txt. If not, see
+https://www.gnu.org/licenses/gpl-3.0.html.
+
+Project and contact: https://github.com/ken51151/PySerialChart
+
+This notice applies to project-owned source code, documentation and assets,
+except where a file carries a separate notice. Third-party components and
+their license documents retain their original copyrights and licenses.
+See THIRD_PARTY_NOTICES.md and licenses/.

@@ -1,136 +1,55 @@
 # SerialChart
 
-SerialChart is a lightweight Python tool for real-time serial data plotting. It reads numeric data from a COM port and displays it as live curves for quick signal monitoring and debugging.
+A serial-port TX/RX terminal with real-time plotting for inspecting device data.
 
-## Features
+[Releases](https://github.com/ken51151/PySerialChart/releases) | [Changelog](CHANGELOG.md)
 
-- Real-time COM port data plotting
-- Single-line and multi-line ASCII data support
-- Configurable packet separation by custom ending or fixed length
-- ASCII and binary value conversion modes
-- Up to 10 dynamic curves in multi-line ASCII mode
-- Cursor mode for inspecting X/Y values
-- Manual Y-axis auto-scaling
-- Optional X-axis follow mode with configurable display width
-- Text transmit input with command history, Tab completion, line endings, and HEX TX support
-- Non-blocking TX worker thread to keep the UI responsive while sending
-- Sine-wave validation function for plot testing
+## Key Features
 
-## Requirements
+- **Interactive TX/RX Terminal**: Multi-mode display (ASCII/HEX) with command history and Tab completion.
+- **Smart RX Framing**: Flexible packet parsing by line-ending or fixed-length, complete with idle flushing and a live preview.
+- **Advanced Live Plotter**: Powered by pyqtgraph, featuring real-time visualization, custom cursors, auto-scaling, and built-in data export.
+- **Cross-Platform Desktop App**: Built with Python and Qt for smooth, native performance across Windows, macOS, and Linux.
 
-```bash
-pip install PyQt5 pyqtgraph pyserial numpy
-```
+## Screenshot
 
-## Configuration
+**TX/RX terminal with ASCII + HEX display**
 
-Most settings are defined near the top of `SerialChart.py`.
+![SerialChart terminal showing example TX and RX data](docs/screenshots/terminal.png)
 
-```python
-PORT = "COM6"
-BAUD = 115200
-MAX_POINTS = 50000
-UPDATE_INTERVAL = 30
-X_FOLLOW_WIDTH_DEFAULT = 2000
-```
+**Independent plot window with multiple curves**
 
-Data parsing can be adjusted with:
+![SerialChart plot showing two example signals](docs/screenshots/plot.png)
 
-```python
-SEP_MODE
-LINE_MODE
-VALUE_MODE
-CUSTOM_END
-LEN_END
-VAL_OFFSET
-```
+<details>
+<summary>Plot settings and live parsing preview</summary>
 
-## Data Format
+![Plot settings extracting INT16 little-endian values from sample bytes](docs/screenshots/plot-settings.png)
 
-### Single-Line Mode
+</details>
 
-Each received packet is converted into one numeric value and plotted as a single curve.
+## Quick Start
 
-### Multi-Line ASCII Mode
+**Windows ZIP:** extract the entire onedir package and run `SerialChart.exe`. Keep `_internal` beside the EXE; Python is not required. See [Releases](https://github.com/ken51151/PySerialChart/releases) for published downloads, or [build locally](packaging/README.md).
 
-Expected format:
+**From source:** use 64-bit Python 3.11 on Windows, preferably in a virtual environment. Run these commands from the project directory:
 
-```text
-name = value
-```
-
-Example:
-
-```text
-temperature = 25
-pressure = 1013
-speed = 120
-```
-
-Each unique name creates or updates its own curve.
-
-## Validation
-
-A sine-wave validation function is available for checking plot behavior without external serial data.
-
-In `update()`:
-
-```python
-self.update_validation_sin()
-```
-
-Comment this line out when validation is not needed.
-
-## Controls
-
-- `Running`: start or stop serial reading
-- `Cursor`: show or hide the X/Y cursor
-- `RectMode`: switch the mouse interaction mode
-- `AutoY`: fit the Y-axis to the current data range
-- `FollowX`: keep the plot following the newest data
-- `X Width`: set the visible X-axis width while `FollowX` is enabled
-- `Clear`: reset all curve data
-- `TX`: type text and press Enter to send it through the COM port
-- `TX history`: press Up/Down to browse previous TX commands, or choose from the drop-down list
-- `TX completion`: press Tab to complete from TX history
-- `HEX TX`: type `hex: 01 02 0A FF` to send raw bytes without appending a line ending
-- `Line ending`: choose the text terminator for normal text TX data: `None`, `LF`, `CR`, or `CRLF`
-
-## Usage
-
-Run the script:
-
-```bash
+```shell
+python -m pip install -r requirements.txt
 python SerialChart.py
 ```
 
-Click `Running` to start reading and plotting data. Use `AutoY` to fit the Y-axis to the current data range.
+1. With COM closed, open **COM** to select the port and serial settings. Configure **Plot > Plot Settings** if plotting is needed.
+2. Use **Connection > Connect** or the connection toolbar button. Choose the terminal display through **RxMode**, and framing through **RX > RX Settings**.
+3. Open **Plot** and use its play/pause button to enable plotting. Closing that window pauses plotting and retains its curves.
 
-## Changelog
+COM and plot settings can only be changed while COM is closed; plot settings also wait for RX cleanup. Main-window **Clear** clears the terminal; Plot **Clear** clears curve data.
 
-### 0.3 (2026/05/28)
+For multi-line ASCII plotting, send one `name=value` packet per configured ending, for example `speed=120` followed by LF. For raw HEX transmission, enter `hex: 01 02 0A FF`; no TX line ending is appended.
 
-- Added editable TX command history with Up/Down navigation and mouse-selectable history.
-- Added Tab completion for TX history commands.
-- Added raw HEX transmit mode using the `hex:` prefix, such as `hex: 01 02 0A FF`.
-- Prevented empty TX input from sending only a line ending.
-- Moved TX handling into `serial_tx.py`, including TX input widgets, HEX parsing, and TX worker/controller logic.
-- Added non-blocking TX thread/controller so serial writes do not freeze the UI.
-- Added TX timeout/error reporting with the original TX string.
-- Added a status bar with COM state and TX status messages.
-- Updated UI sizing, font family, TX row layout, and plot minimum height.
-- Added `.gitignore` for Python cache and local environment files.
+## Development and License
 
-### 0.2 (2026/05/27)
-
-- Added version constants and versioned window title.
-- Added configurable X-axis follow mode.
-- Added text transmit input with selectable line ending.
-- Optimized multi-line ASCII updates by batching new values per curve before updating buffers.
-- Changed Y-axis auto-scaling to apply once instead of continuously auto-ranging.
-- Added README documentation.
-
-### 0.1
-
-- Initial serial plotting tool.
-- Added COM port reading, packet parsing, single-line mode, multi-line ASCII mode, cursor inspection, and basic plot controls.
+- Run tests: `python -m unittest discover -s tests -v`.
+- Build a Windows ZIP: `python packaging/build_release.py`; details in [packaging/README.md](packaging/README.md).
+- Planned work and historical decisions: [TODO.md](TODO.md). Version history: [CHANGELOG.md](CHANGELOG.md).
+- Licensed under [GPL-3.0-only](LICENSE.txt). See [third-party notices](THIRD_PARTY_NOTICES.md) and [source/release requirements](SOURCE.md). Licenses are also available in **Help > Licenses**.

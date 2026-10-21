@@ -1,120 +1,55 @@
 ﻿# pip install PyQt5 pyqtgraph pyserial
 
 import sys
-import serial
-import struct
-import math
-import numpy as np
-import pyqtgraph as pg
-from pyqtgraph.Qt import QtWidgets, QtCore
-from enum import IntEnum
+from pathlib import Path
+from dataclasses import replace
+from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
+from app_config import AppConfig
+from serial_comm import apply_serial_config, create_serial_port
+from port_settings_dialog import PortSettingsDialog
+from plot_window import PlotWindow
+from plot_settings_dialog import PlotSettingsDialog
+from about_dialog import AboutDialog
+from rx_terminal_config import (
+    RxTerminalDisplayMode as RX_TERMINAL_DISPLAY_MODES,
+    RxTerminalFrameMode as RX_TERMINAL_FRAME_MODES,
+)
+from rx_terminal_settings_dialog import RxTerminalSettingsDialog
 from serial_tx import (
     TX_WRITE_TIMEOUT,
-    TX_LINE_ENDINGS,
     TxHistoryComboBox,
     TxController,
 )
+from serial_rx import RxPlotParser, SerialRxController
 
-DEBUG_LINE_ENABLE = False       # Add debug line(sin wave) while running
 WINDOWS_TITLE = 'SerialChart'
 VERSION_MAJOR = 0
 VERSION_MINOR = 3
 VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
-
-# ===== Serial 設定 =====
-PORT = "COM6"
-BAUD = 115200
-
-# ===== 圖表/接收模式設定 =====
-MAX_POINTS = 50000              # curve ring buffer size
-MAX_LINES = 10                  # max curve (only multi line mode)
-UPDATE_INTERVAL = 30            # update interval [ms]
-
-# @@@@@ 資料分段方式, 特定資料 or 固定長度
-class SEP_MODES(IntEnum):
-    CUSTOM_END = 1          # 特定資料分段, 常用在ASCII格式, 可搭配binary使用，但注意數值可能跟結尾符相撞
-    LENGTH = 2              # 固定長度分段, 常用在binary格式
-SEP_MODE = SEP_MODES.CUSTOM_END
-
-# @@@@@ 線段模式
-class LINE_MODES(IntEnum):
-    SINGLE_LINE = 1         # 單線段模式, 通常無冗餘資料, 效率上最高
-    MULTI_LINE_ASCII = 2    # 多線段模式, 會將各封包再次分析在匹配到各線段, ASCII資料格式為 "<name> = <value>", 最多10條
-LINE_MODE = LINE_MODES.MULTI_LINE_ASCII
-colors = ['y', 'g', 'r', 'c', 'm', 'w', 'b', (255,165,0), (128,0,128), (0,255,127)]
-
-# @@@@@ 數值處理方式, ASCII or binary
-class VALUE_MODES(IntEnum):
-    # ASCII
-    ASCII_INT = 1           # ASCII interger
-    ASCII_FLOAT = 2         # ASCII float
-    # binary with Little-endian
-    BIN_U8 = 10
-    BIN_I8 = 11
-    BIN_U16_LE = 12
-    BIN_I16_LE = 13
-    BIN_U32_LE = 14
-    BIN_I32_LE = 15
-    BIN_U64_LE = 16
-    BIN_I64_LE = 17
-    # binary with big-endian
-    BIN_U16_BE = 20
-    BIN_I16_BE = 21
-    BIN_U32_BE = 22
-    BIN_I32_BE = 23
-    BIN_U64_BE = 24
-    BIN_I64_BE = 25
-    # binary float/double (IEEE 754)
-    BIN_FLOAT  = 40
-    BIN_DOUBLE = 41
-VALUE_MODE = VALUE_MODES.ASCII_INT
-
-# @@@@@ 特定資料分段設定
-ASCII_CR = "\r"             # CR: 0x0D, Carriage Return
-ASCII_LF = "\n"             # LF: 0x0A, Line Feed
-ASCII_CRLR = "\r\n"         # CRLF: [0D,0A]
-CUSTOM_END = ASCII_LF       # 僅在CUSTOM_END模式下有效, 特定資料進行分段
-
-# @@@@@ 固定長度分段設定
-LEN_END = 5                 # 僅在LENGTH模式下有效
-
-# @@@@@ General Setting
-VAL_OFFSET = 0              # 數值分段後的固定位移, 除了MULTI_LINE_ASCII以外的所有模式都會受影響, 不會檢查是否溢出
-SEP = CUSTOM_END.encode()   # 預先計算分隔符避免即時運算的花費
-
+ICON_DIR = Path(__file__).resolve().parent / "assets" / "icons"
 
 # @@@@@ UI component
-X_FOLLOW_WIDTH_DEFAULT = 2000   # default X width while following latest data
 UI_FONT_FAMILY = "Microsoft JhengHei UI"
 UI_FONT_POINT_DELTA = 2
+RX_TERMINAL_FONT_FAMILY = "Cascadia Mono"
+RX_TERMINAL_FONT_SIZE = 12
 
-# --------------------------------------------------------
-# table for value mode
-VALUE_CONFIG_TABLE = {
-    VALUE_MODES.ASCII_INT:  ('ASCII', int,   4),    # ASCII mode
-    VALUE_MODES.ASCII_FLOAT:('ASCII', float, 4),
-	VALUE_MODES.BIN_U8:     ('BIN', '<B',  1),    # binary mode
-    VALUE_MODES.BIN_I8:     ('BIN', '<b',  1),
-    VALUE_MODES.BIN_U16_LE: ('BIN', '<H',  2),
-    VALUE_MODES.BIN_I16_LE: ('BIN', '<h',  2),
-    VALUE_MODES.BIN_U32_LE: ('BIN', '<I',  4),
-    VALUE_MODES.BIN_I32_LE: ('BIN', '<i',  4),
-    VALUE_MODES.BIN_U64_LE: ('BIN', '<Q',  8),
-    VALUE_MODES.BIN_I64_LE: ('BIN', '<q',  8),
-    VALUE_MODES.BIN_U16_BE: ('BIN', '>H',  2),
-    VALUE_MODES.BIN_I16_BE: ('BIN', '>h',  2),
-    VALUE_MODES.BIN_U32_BE: ('BIN', '>I',  4),
-    VALUE_MODES.BIN_I32_BE: ('BIN', '>i',  4),
-    VALUE_MODES.BIN_U64_BE: ('BIN', '>Q',  8),
-    VALUE_MODES.BIN_I64_BE: ('BIN', '>q',  8),
-    VALUE_MODES.BIN_FLOAT:  ('BIN', '<f',  4),
-    VALUE_MODES.BIN_DOUBLE: ('BIN', '<d',  8),
-}
+ASCII_CONTROL_NAMES = (
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL",
+    "BS", "TAB", "LF", "VT", "FF", "CR", "SO", "SI",
+    "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB",
+    "CAN", "EM", "SUB", "ESC", "FS", "GS", "RS", "US",
+)
+ASCII_CONTROL_LABELS = {value: f"[{name}]" for value, name in enumerate(ASCII_CONTROL_NAMES)}
+ASCII_CONTROL_LABELS[0x7F] = "[DEL]"
+
 # ========================================================
 class SerialPlot:
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config if config is not None else AppConfig()
         # 初始化 Qt Window
         self.app = QtWidgets.QApplication(sys.argv)
+        self.app.setWindowIcon(QtGui.QIcon(str(ICON_DIR / "serialchart_app.ico")))
         font = self.app.font()
         font.setFamily(UI_FONT_FAMILY)
         if font.pointSize() > 0:
@@ -125,45 +60,15 @@ class SerialPlot:
         self.main_win = QtWidgets.QMainWindow()
         self.main_win.setWindowTitle(f"{WINDOWS_TITLE} v{VERSION}")
         self.main_win.resize(800, 600)
+        self.main_win.closeEvent = self.main_window_close_event
         self.central_widget = QtWidgets.QWidget()
         self.main_win.setCentralWidget(self.central_widget)
         self.layout = QtWidgets.QVBoxLayout(self.central_widget)
+        self.rx_terminal_pending = bytearray()
    
-
-        # 頂部控制區
-        self.controls_layout = QtWidgets.QHBoxLayout()
-        self.btn_cursor = QtWidgets.QCheckBox("&Cursor")
-        self.btn_cursor.toggled.connect(self.cursor_toggle)
-        self.btn_rectMode = QtWidgets.QCheckBox("&RectMode")
-        self.btn_rectMode.toggled.connect(self.rect_mode_toggle)
-        self.btn_connect = QtWidgets.QPushButton("")
-        self.btn_connect.setFixedSize(100, 30)
-        self.btn_connect.setCheckable(True)
-        self.btn_connect.toggled.connect(self.conncet_toggle)
-        self.btn_autoY = QtWidgets.QPushButton("Auto&Y")
-        self.btn_autoY.setFixedSize(80, 30)
-        self.btn_autoY.clicked.connect(self.auto_y)
-        self.btn_followX = QtWidgets.QCheckBox("Follow&X")
-        self.btn_followX.setChecked(True)
-        self.btn_followX.toggled.connect(self.follow_x_toggle)
-        self.spin_x_width = QtWidgets.QSpinBox()
-        self.spin_x_width.setRange(1, MAX_POINTS)
-        self.spin_x_width.setValue(X_FOLLOW_WIDTH_DEFAULT)
-        self.spin_x_width.setSuffix(" pts")
-        self.spin_x_width.setFixedSize(120, 30)
-        self.spin_x_width.setSingleStep(100)
-        self.spin_x_width.valueChanged.connect(self.update_x_range)
-        self.btn_clear = QtWidgets.QPushButton("Clear🧹")
-        self.btn_clear.setFixedSize(100, 30)
-        self.btn_clear.clicked.connect(self.clear_data)
-        self.controls_layout.addWidget(self.btn_connect)
-        self.controls_layout.addWidget(self.btn_cursor)
-        self.controls_layout.addWidget(self.btn_rectMode)
-        self.controls_layout.addWidget(self.btn_autoY)
-        self.controls_layout.addWidget(self.btn_followX)
-        self.controls_layout.addWidget(self.spin_x_width)
-        self.controls_layout.addWidget(self.btn_clear)
-        self.controls_layout.addStretch()
+        # Toolbar on top
+        self.create_toolbar()
+        self.create_menubar()
 
         # 傳送控制區
         self.tx_layout = QtWidgets.QHBoxLayout()
@@ -175,7 +80,7 @@ class SerialPlot:
         self.tx_input.lineEdit().returnPressed.connect(self.send_tx_input)
         self.combo_tx_line_end = QtWidgets.QComboBox()
         self.combo_tx_line_end.setFixedSize(90, 30)
-        self.combo_tx_line_end.addItems(TX_LINE_ENDINGS.keys())
+        self.combo_tx_line_end.addItems(self.config.tx.line_endings.keys())
         self.combo_tx_line_end.setCurrentText('LF (\\n)')
         self.btn_send = QtWidgets.QPushButton("&Send")
         self.btn_send.setFixedSize(80, 30)
@@ -186,14 +91,16 @@ class SerialPlot:
         self.tx_layout.addWidget(self.btn_send)
         # self.tx_layout.addStretch()       // add stretch in right side
 
-        # 曲線圖
-        self.residual = b""                     # 儲存末端的不完整資料
-        self.win = pg.GraphicsLayoutWidget()
-        self.win.setMinimumHeight(200)
-        self.plot = self.win.addPlot()
-        self.plot.showGrid(x=True, y=True)
-        self.plot.setYRange(-2000, 2000, padding=0.05)
-        self.plot.setXRange(0, X_FOLLOW_WIDTH_DEFAULT, padding=0)
+        # 接收資料顯示區
+        self.rx_terminal = QtWidgets.QPlainTextEdit()
+        self.rx_terminal.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.rx_terminal.setMinimumHeight(300)
+        terminal_font = QtGui.QFont(RX_TERMINAL_FONT_FAMILY, RX_TERMINAL_FONT_SIZE)
+        terminal_font.setStyleHint(QtGui.QFont.Monospace)
+        self.rx_terminal.setFont(terminal_font)
+        self.rx_terminal_flush_timer = QtCore.QTimer()
+        self.rx_terminal_flush_timer.setSingleShot(True)
+        self.rx_terminal_flush_timer.timeout.connect(self.flush_rx_terminal_pending)
 
         # 狀態列
         self.com_status_icon = QtWidgets.QLabel("")
@@ -203,87 +110,411 @@ class SerialPlot:
         self.status_bar.addWidget(self.tx_status, 1)
 
         # 將元件加入layout
-        self.layout.addLayout(self.controls_layout)
         self.layout.addLayout(self.tx_layout)
-        self.layout.addWidget(self.win)
+        self.layout.addWidget(self.rx_terminal)
         self.main_win.setStatusBar(self.status_bar)
-
-        # 輔助線
-        self.vLine = pg.InfiniteLine(angle=90, movable=False, pen='w')
-        self.hLine = pg.InfiniteLine(angle=0, movable=False, pen='w')
-        self.label = pg.TextItem(anchor=(1,1), color='y')
-        self.plot.addItem(self.vLine, ignoreBounds=True)
-        self.plot.addItem(self.hLine, ignoreBounds=True)
-        self.plot.addItem(self.label)
-        self.mouse_proxy = None 
-        self.cursor_hide()
-        # 省效能設定
-        # self.plot.setDownsampling(mode='peak')  # 降取樣功能, 'peak'或是 'mean', 
-        # self.plot.setClipToView(True)           # 只畫出目前視窗看得到的點
 
         # others
         print(f"{WINDOWS_TITLE} v{VERSION}")
-        info = ""
-        offset = VAL_OFFSET
-        self.ser = serial.Serial(baudrate=BAUD, timeout=0.1, write_timeout=TX_WRITE_TIMEOUT)
-        self.ser.port = PORT
-        if   SEP_MODE == SEP_MODES.CUSTOM_END:          self.rxHandle = self.rxHandle_split     ; info += "特定資料分段模式"
-        elif SEP_MODE == SEP_MODES.LENGTH:              self.rxHandle = self.rxHandle_length    ; info += "固定長度分段模式"
-        else:                                           print('ERROR, invalid SEP_MODE!!!')     ; info += "!!! 模式錯誤 !!!"
+        self.ser = create_serial_port(self.config.comm)
+        plot_config = self.config.plot
+        parser_config = self.create_rx_parser_config()
+        print(
+            f"{parser_config.sep_mode}, {parser_config.line_mode}, "
+            f"{parser_config.value_type}, size={parser_config.value_size}, "
+            f"offset={parser_config.offset}, SEP=[{parser_config.sep.hex(' ').upper()}], "
+            f"Length={parser_config.len_end}"
+        )
 
-        self.max_current_idx = 0
-        self.curves_data = {}   # 字典管理多條線段： { "name": {"buf": array, "idx": 0, "curve": pg_object} }
-        if   LINE_MODE == LINE_MODES.SINGLE_LINE:
-            info += ", 單線段模式"
-            buf = np.full(MAX_POINTS, np.nan)  # curve 原始資料
-            curve = self.plot.plot(pen=colors[0])
-            curve.setData(buf, connect="finite")
-            self.curves_data["default"] = {"buf": buf, "idx": 0, "curve": curve}
-            self.update_packets = self.update_line_single
-        elif LINE_MODE == LINE_MODES.MULTI_LINE_ASCII:
-            info += ", 多線段ASCII模式"
-            # 多線段會動態新增線段
-            self.plot.addLegend()   # 多線段模式建議開啟圖例
-            self.update_packets = self.update_line_ascii
-        else:
-            info += "!!! 線段設定錯誤 !!!"  
-            print('ERROR, invalid LINE_MODE!!!')
-        
-        if VALUE_MODE in VALUE_CONFIG_TABLE:
-            type, fmt, size = VALUE_CONFIG_TABLE[VALUE_MODE]
-            if type == 'ASCII':
-                if offset == 0:                         self.convert_func = fmt
-                else:                                   self.convert_func = lambda pak, f=fmt, s=size: f(pak[offset:offset + s])
-                info += " + {}, size={}, offset={}, SEP=[{}]".format(type, size, offset, SEP.hex(' ').upper())
-            else:
-                if offset == 0:                         self.convert_func = lambda pak, f=fmt, s=size: struct.unpack(f, pak[:s])[0]
-                else:                                   self.convert_func = lambda pak, f=fmt, s=size: struct.unpack(f, pak[offset : offset + s])[0]
-                info += " + {}, size={}, offset={}, Length={}".format(type, size, offset, LEN_END)
-        else:
-            print('ERROR, invalid VALUE_MODE!!!')
-            self.convert_func = lambda x: x # 預防性 fallback，避免執行時報錯
-        print(info)
+        self.plot_window = PlotWindow(
+            plot_config.max_points,
+            plot_config.max_lines,
+            plot_config.x_follow_width,
+            parser_config.line_mode,
+            plot_config.colors,
+            plot_config.debug_line_enabled,
+        )
+        self.plot_window.hidden.connect(self.plot_window_hidden)
+        self.plot_window.clear_requested.connect(self.reset_plot_parser)
+        self.plot_window.plot_running_changed.connect(self.set_plot_running)
+        self.plot_window.settings_requested.connect(self.open_plot_settings_dialog)
 
-        # update timer
+        # update timer (validation only; RX uses SerialRxController)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update)
 
+        # rx controller
+        self.rx_controller = SerialRxController(self.config.rx_interval_ms)
+        # PlotWindow owns curve buffers; the main window only routes parsed plot batches.
+        self.rx_controller.plot_batch_ready.connect(self.handle_plot_batch)
+        self.rx_controller.stopped.connect(self.update_plot_settings_enabled)
+        self.rx_controller.raw_received.connect(self.handle_terminal_raw_rx)
+        self.rx_controller.failed.connect(self.rx_failed)
+        self.rx_controller.set_terminal_enabled(True)
+
         # tx controller
-        self.tx_controller = TxController()
+        self.tx_controller = TxController(self.config.tx)
         self.tx_controller.started.connect(self.tx_started)
         self.tx_controller.finished.connect(self.tx_finished)
         self.tx_controller.failed.connect(self.tx_failed)
         self.tx_controller.rejected.connect(self.tx_status.setText)
-        self.conncet_toggle(False)
+        self.disconnect_serial()
 
-        # debug
-        self.validation_sin_phase = 0.0     # only for validation function: update_validation_sin()
-        
+# ========================================================
+# ========================================================        
+# ========================================================
+    def create_toolbar(self):
+        self.main_toolbar = QtWidgets.QToolBar("Main", self.main_win)
+        self.main_toolbar.setIconSize(QtCore.QSize(52, 52))
+        self.main_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        self.main_toolbar.setStyleSheet("QToolButton { font-size: 9pt; }")
+        self.main_win.addToolBar(QtCore.Qt.TopToolBarArea, self.main_toolbar)
+
+        self.icon_connect = QtGui.QIcon(str(ICON_DIR / "connected.svg"))
+        self.icon_disconnect = QtGui.QIcon(str(ICON_DIR / "disconnected.svg"))
+        self.rx_display_mode_icons = {
+            RX_TERMINAL_DISPLAY_MODES.ASCII: QtGui.QIcon(str(ICON_DIR / "rx_mode_ascii_256.png")),
+            RX_TERMINAL_DISPLAY_MODES.ASCII_HEX: QtGui.QIcon(str(ICON_DIR / "rx_mode_ascii_hex_256.png")),
+            RX_TERMINAL_DISPLAY_MODES.HEX: QtGui.QIcon(str(ICON_DIR / "rx_mode_hex_256.png")),
+        }
+
+        self.action_connect_toggle = QtWidgets.QAction(
+            self.icon_disconnect, "Disconnected", self.main_win
+        )
+        self.action_com_setting = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "com_setting.svg")), "COM", self.main_win
+        )
+        self.action_plot = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "plot.svg")), "Plot", self.main_win
+        )
+        self.action_rx_display_mode = QtWidgets.QAction(
+            self.rx_display_mode_icons[self.config.terminal.display_mode],
+            "RxMode",
+            self.main_win,
+        )
+        self.action_clear = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "clear.svg")), "Clear", self.main_win
+        )
+        self.action_close = QtWidgets.QAction(
+            QtGui.QIcon(str(ICON_DIR / "close.svg")), "Close", self.main_win
+        )
+        self.action_connect_toggle.setToolTip("Disconnected")
+        self.action_com_setting.setToolTip("COM Port Settings")
+        self.action_plot.setToolTip("Show Plot")
+        self.update_rx_display_mode_action()
+        self.action_clear.setToolTip("Clear Terminal")
+        self.action_close.setToolTip("Close Application")
+        self.action_clear.setEnabled(True)
+
+        self.action_connect_toggle.triggered.connect(self.toggle_serial_connection)
+        self.action_com_setting.triggered.connect(self.open_port_settings_dialog)
+        self.action_plot.triggered.connect(self.show_plot_window)
+        self.action_rx_display_mode.triggered.connect(self.cycle_rx_display_mode)
+        self.action_clear.triggered.connect(self.clear_terminal)
+        self.action_close.triggered.connect(self.close_application)
+
+        self.main_toolbar.addAction(self.action_connect_toggle)
+        self.main_toolbar.addAction(self.action_com_setting)
+        self.main_toolbar.addAction(self.action_plot)
+        self.create_rx_display_tool_button()
+        self.main_toolbar.addAction(self.action_clear)
+        self.main_toolbar.addSeparator()
+        self.main_toolbar.addAction(self.action_close)
+        self.set_toolbar_button_widths()
+
+    def create_menubar(self):
+        menu_bar = self.main_win.menuBar()
+        self.file_menu = menu_bar.addMenu("&File")
+        self.file_menu.addAction(self.action_clear)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_close)
+
+        self.connection_menu = menu_bar.addMenu("&Connection")
+        self.action_connect = QtWidgets.QAction(self.icon_connect, "Connect", self.main_win)
+        self.action_disconnect = QtWidgets.QAction(self.icon_disconnect, "Disconnect", self.main_win)
+        self.action_connect.triggered.connect(self.connect_serial)
+        # QAction's checked flag is not the optional disconnect status message.
+        self.action_disconnect.triggered.connect(lambda checked=False: self.disconnect_serial())
+        self.connection_menu.addAction(self.action_connect)
+        self.connection_menu.addAction(self.action_disconnect)
+        self.connection_menu.addSeparator()
+        self.action_com_setting.setText("COM Settings...")
+        self.action_com_setting.setIconText("COM")
+        self.connection_menu.addAction(self.action_com_setting)
+
+        self.plot_menu = menu_bar.addMenu("&Plot")
+        self.plot_menu.addAction(self.action_plot)
+        self.action_plot_settings = QtWidgets.QAction(
+            self.action_com_setting.icon(), "Plot Settings...", self.main_win,
+        )
+        self.action_plot_settings.triggered.connect(self.open_plot_settings_dialog)
+        self.plot_menu.addAction(self.action_plot_settings)
+
+        self.rx_menu = menu_bar.addMenu("&RX")
+        self.rx_mode_menu = self.rx_menu.addMenu("RX Mode")
+        for action in self.rx_display_actions.values():
+            self.rx_mode_menu.addAction(action)
+        self.rx_menu.addSeparator()
+        self.action_rx_terminal_settings.setText("RX Settings...")
+        self.rx_menu.addAction(self.action_rx_terminal_settings)
+
+        self.help_menu = menu_bar.addMenu("&Help")
+        self.action_about = QtWidgets.QAction(
+            self.main_win.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxInformation),
+            "About...", self.main_win,
+        )
+        self.action_about.triggered.connect(self.open_about_dialog)
+        self.action_licenses = QtWidgets.QAction("Licenses...", self.main_win)
+        self.action_licenses.triggered.connect(lambda checked=False: self.open_about_dialog(show_licenses=True))
+        self.help_menu.addAction(self.action_about)
+        self.help_menu.addAction(self.action_licenses)
+
+# ========================================================
+    def create_rx_display_tool_button(self):
+        self.rx_display_menu = QtWidgets.QMenu(self.main_win)
+        self.rx_display_action_group = QtWidgets.QActionGroup(self.main_win)
+        self.rx_display_action_group.setExclusive(True)
+        self.rx_display_actions = {}
+
+        for mode in RX_TERMINAL_DISPLAY_MODES:
+            action = QtWidgets.QAction(self.rx_display_mode_label(mode), self.main_win)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, selected=mode: self.set_rx_display_mode(selected))
+            self.rx_display_action_group.addAction(action)
+            self.rx_display_menu.addAction(action)
+            self.rx_display_actions[mode] = action
+
+        self.rx_display_menu.addSeparator()
+        self.action_rx_terminal_settings = QtWidgets.QAction("Frame Settings...", self.main_win)
+        self.action_rx_terminal_settings.triggered.connect(self.open_rx_terminal_settings_dialog)
+        self.rx_display_menu.addAction(self.action_rx_terminal_settings)
+
+        self.rx_display_tool_button = QtWidgets.QToolButton(self.main_win)
+        self.rx_display_tool_button.setDefaultAction(self.action_rx_display_mode)
+        self.rx_display_tool_button.setMenu(self.rx_display_menu)
+        self.rx_display_tool_button.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        self.rx_display_tool_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        self.main_toolbar.addWidget(self.rx_display_tool_button)
+        self.update_rx_terminal_menu_actions()
+
+# ========================================================
+    def set_toolbar_button_widths(self):
+        button_widths = {
+            self.action_connect_toggle: 120,
+            self.action_com_setting: 90,
+            self.action_plot: 90,
+            self.action_clear: 90,
+            self.action_close: 90,
+        }
+
+        for action, width in button_widths.items():
+            button = self.main_toolbar.widgetForAction(action)
+            if button:
+                button.setFixedWidth(width)
+                button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+
+        self.rx_display_tool_button.setFixedWidth(100)
+        self.rx_display_tool_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+
+# ========================================================
+    def update_toolbar_actions(self, connected):
+        if connected:
+            self.action_connect_toggle.setText("Connected")
+            self.action_connect_toggle.setIcon(self.icon_connect)
+            self.action_connect_toggle.setToolTip("Connected")
+        else:
+            self.action_connect_toggle.setText("Disconnected")
+            self.action_connect_toggle.setIcon(self.icon_disconnect)
+            self.action_connect_toggle.setToolTip("Disconnected")
+
+        self.action_com_setting.setEnabled(not connected)
+        self.action_connect.setEnabled(not connected)
+        self.action_disconnect.setEnabled(connected)
+
+# ========================================================
+    def rx_display_mode_label(self, mode=None):
+        mode = self.config.terminal.display_mode if mode is None else mode
+        if mode == RX_TERMINAL_DISPLAY_MODES.ASCII_HEX:
+            return "ASCII+HEX"
+        if mode == RX_TERMINAL_DISPLAY_MODES.HEX:
+            return "HEX"
+        return "ASCII"
+
+# ========================================================
+    def update_rx_display_mode_action(self):
+        label = self.rx_display_mode_label()
+        self.action_rx_display_mode.setText("RxMode")
+        self.action_rx_display_mode.setIcon(
+            self.rx_display_mode_icons[self.config.terminal.display_mode]
+        )
+        self.action_rx_display_mode.setToolTip(f"RX Display: {label}, {self.rx_terminal_frame_label()}")
+
+# ========================================================
+    def update_rx_terminal_menu_actions(self):
+        self.rx_display_actions[self.config.terminal.display_mode].setChecked(True)
+
+# ========================================================
+    def cycle_rx_display_mode(self):
+        next_value = (int(self.config.terminal.display_mode) + 1) % len(RX_TERMINAL_DISPLAY_MODES)
+        self.set_rx_display_mode(RX_TERMINAL_DISPLAY_MODES(next_value))
+
+# ========================================================
+    def set_rx_display_mode(self, mode):
+        self.flush_rx_terminal_pending()
+        self.config.terminal = replace(self.config.terminal, display_mode=mode)
+        self.update_rx_display_mode_action()
+        self.update_rx_terminal_menu_actions()
+        self.tx_status.setText(f"RX display: {self.rx_display_mode_label()}")
+
+# ========================================================
+    def apply_rx_terminal_config(self, config):
+        self.flush_rx_terminal_pending()
+        self.config.terminal = config
+        self.update_rx_display_mode_action()
+        self.update_rx_terminal_menu_actions()
+        self.tx_status.setText(f"RX frame: {self.rx_terminal_frame_label()}")
+
+# ========================================================
+    def open_rx_terminal_settings_dialog(self):
+        dialog = RxTerminalSettingsDialog(
+            self.config.terminal,
+            len(self.rx_terminal_pending),
+            self.main_win,
+        )
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_rx_terminal_config(dialog.get_config())
+
+# ========================================================
+    def rx_terminal_frame_label(self):
+        if self.config.terminal.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+            return f"Fixed {self.config.terminal.fixed_length}"
+        return f"Ending {self.config.terminal.terminator_name}"
+
+# ========================================================
+    def show_plot_window(self):
+        if not self.plot_window.isVisible():
+            self.plot_window.move(self.main_win.x() + 120, self.main_win.y() + 120)
+        self.plot_window.show()
+        self.plot_window.raise_()
+        self.plot_window.activateWindow()
+
+    def can_edit_plot_settings(self):
+        # Wait for controller cleanup as well as COM close; stop() has a bounded wait.
+        return not self.ser.is_open and self.rx_controller.thread is None
+
+    def update_plot_settings_enabled(self):
+        enabled = self.can_edit_plot_settings()
+        self.plot_window.set_settings_enabled(enabled)
+        self.action_plot_settings.setEnabled(enabled)
+
+    def open_plot_settings_dialog(self):
+        if not self.can_edit_plot_settings():
+            return
+        dialog = PlotSettingsDialog(self.config.plot, self.plot_window)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_plot_config(dialog.get_config())
+
+    def apply_plot_config(self, config):
+        if not self.can_edit_plot_settings():
+            return False
+        try:
+            config.validate()
+        except ValueError as error:
+            self.tx_status.setText(str(error))
+            return False
+        if config == self.config.plot:
+            return True
+        self.plot_window.apply_config(config)
+        self.config.plot = config
+        self.tx_status.setText("Plot settings applied; existing lines preserved")
+        return True
+
+    def handle_plot_batch(self, batch):
+        # Discard queued batches from a closed connection.
+        if self.ser.is_open:
+            self.plot_window.update_plot_batch(batch)
+
+# ========================================================
+    def plot_window_hidden(self):
+        pass
+
+# ========================================================
+    def set_plot_running(self, running):
+        self.rx_controller.set_plot_enabled(running)
+
+# ========================================================
+    def reset_plot_parser(self):
+        self.rx_controller.reset_plot_parser()
+
+# ========================================================
+    def toggle_serial_connection(self):
+        if self.ser.is_open:
+            self.disconnect_serial()
+        else:
+            self.connect_serial()
+
+# ========================================================
+    def close_application(self):
+        self.main_win.close()
+
+    def open_about_dialog(self, show_licenses=False):
+        dialog = AboutDialog(WINDOWS_TITLE, VERSION, self.main_win)
+        if show_licenses:
+            dialog.tabs.setCurrentIndex(1)
+        dialog.exec_()
+
+# ========================================================
+    def main_window_close_event(self, event):
+        if self.ser.is_open:
+            self.disconnect_serial()
+        self.plot_window.hide()
+        event.accept()
+
+# ========================================================
+    def apply_comm_config(self, config):
+        if self.ser.is_open:
+            self.tx_status.setText("Close COM before changing settings")
+            return False
+
+        try:
+            apply_serial_config(self.ser, config)
+        except Exception as e:
+            print(f"COM config error: {e}")
+            self.tx_status.setText("COM config error")
+            return False
+
+        self.config.comm = config
+        self.tx_status.setText(f"{config.port}, {config.baudrate}")
+        return True
+
+# ========================================================
+    def open_port_settings_dialog(self):
+        if self.ser.is_open:
+            self.tx_status.setText("Close COM before changing settings")
+            return
+
+        dialog = PortSettingsDialog(self.config.comm, self.main_win)
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_comm_config(dialog.get_config())
+
 # ========================================================
     def send_tx_input(self):
         text = self.tx_input.currentText()
-        line_end = TX_LINE_ENDINGS[self.combo_tx_line_end.currentText()]
+        line_end = self.config.tx.line_endings[self.combo_tx_line_end.currentText()]
         self.tx_controller.send(self.ser, text, line_end)
+
+# ========================================================
+    def apply_tx_config(self, config):
+        self.config.tx = config
+        current_line_end = self.combo_tx_line_end.currentText()
+        self.combo_tx_line_end.clear()
+        self.combo_tx_line_end.addItems(config.line_endings.keys())
+        if current_line_end in config.line_endings:
+            self.combo_tx_line_end.setCurrentText(current_line_end)
+        elif config.line_endings:
+            self.combo_tx_line_end.setCurrentIndex(0)
+
+        self.tx_controller.apply_config(config)
 
 # ========================================================
     def tx_started(self, is_hex):
@@ -296,6 +527,8 @@ class SerialPlot:
             self.btn_send.setEnabled(True)
         status_prefix = "Queued" if TX_WRITE_TIMEOUT == 0 else "Sent"
         self.tx_status.setText(f"{status_prefix} {bytes_sent}/{total_bytes} bytes")
+        self.flush_rx_terminal_pending()
+        self.append_terminal_text(f">> {text}\n")
         self.tx_input.remember(text)
 
 # ========================================================
@@ -306,313 +539,173 @@ class SerialPlot:
         print(detail)
 
 # ========================================================
-    def rxHandle_split(self, new_rx):
-        packets = (self.residual + new_rx).split(SEP)   # 補回不完整的資料再切割
-        self.residual = packets.pop()                   # 取出最後一項不完整資料, 剩下的都是完整的封包
-
-        if not packets:
-            return
-
-        packets = filter(None, packets)                 # 過濾空封包
-        self.update_packets(packets)
 # ========================================================
-    def rxHandle_length(self, new_rx):
-        N = LEN_END
-        data = self.residual + new_rx
-        num_packets = len(data) // N
-        packets = [data[i*N : (i+1)*N] for i in range(num_packets)]
-        self.residual = data[num_packets * N:]
-
-        if not packets:
-            return
-        
-        self.update_packets(packets)
 # ========================================================
-    def update_line_single(self, packets):
-        # 單線模式直接對應到 "default" 線段
-        curve_info = self.curves_data.get("default")
+    def handle_terminal_raw_rx(self, raw_rx):
+        self.rx_terminal_pending.extend(raw_rx)
+        text = self.take_complete_rx_terminal_frames()
+        if text:
+            self.append_terminal_text(text)
 
-        try:
-            new_values = [self.convert_func(pak) for pak in packets]
-            num_new = len(new_values)
-
-            if num_new == 0: 
-                return
-            
-            buf = curve_info["buf"]
-            idx = curve_info["idx"]
-
-            # --- 更新 NumPy Buffer ---
-            if idx + num_new <= MAX_POINTS:    # Buffer 還沒填滿，從左往右填充
-                buf[idx : idx + num_new] = new_values
-                curve_info["idx"] += num_new
-                self.max_current_idx = idx + num_new
-            else:                              # 剛好填滿或已經溢出, 切換到滾動模式
-                buf[:-num_new] = buf[num_new:]    # 將舊資料左移
-                buf[-num_new:] = new_values       # 新資料填入最末端
-                curve_info["idx"] = MAX_POINTS
-                self.max_current_idx = MAX_POINTS
-            v_len = self.max_current_idx        # 有效資料點數量 (僅傳有效資料給curve)
-            curve_info["curve"].setData(buf[:v_len], connect="finite")
-            # curve_info["curve"].setData(buf[::2], connect="finite")     # 更新curve, 2點取1點, 當資料過大時可考慮
-            self.update_x_range()
-
-        except ValueError as e:
-            print(f"Data conversion error: {e}")
-# ========================================================
-    def _get_or_create_curve(self, name):
-        # 根據名稱取得線段資訊，若不存在則動態建立 (最多10條)
-        if name not in self.curves_data:
-            if len(self.curves_data) >= MAX_LINES:
-                return None # 超過數量限制不處理
-            
-            # 建立新的線段與 Buffer
-            buf = np.full(MAX_POINTS, np.nan)
-            # 自動給予不同顏色 (簡單輪詢)
-            color = colors[len(self.curves_data) % len(colors)]
-            
-            curve = self.plot.plot(pen=color, name=name)
-            self.curves_data[name] = {"buf": buf, "idx": 0, "curve": curve}
-            
-        return self.curves_data[name]
-# ========================================================
-    def _append_curve_value(self, curve_info, value):
-        buf = curve_info["buf"]
-        idx = curve_info["idx"]
-        if idx < MAX_POINTS:
-            buf[idx] = value
-            curve_info["idx"] += 1
+        if self.rx_terminal_pending:
+            if len(self.rx_terminal_pending) >= self.config.terminal.pending_limit:
+                self.flush_rx_terminal_pending()
+            else:
+                self.rx_terminal_flush_timer.start(self.config.terminal.idle_timeout_ms)
         else:
-            buf[:-1] = buf[1:]
-            buf[-1] = value
-# ========================================================
-    def _append_curve_values(self, curve_info, values):
-        num_new = len(values)
-        if num_new == 0:
+            self.rx_terminal_flush_timer.stop()
+
+    def clear_terminal(self):
+        self.rx_terminal_flush_timer.stop()
+        self.rx_terminal_pending.clear()
+        self.rx_terminal.clear()
+
+    def append_terminal_text(self, text):
+        cursor = self.rx_terminal.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        cursor.insertText(text)
+        self.rx_terminal.setTextCursor(cursor)
+        self.rx_terminal.ensureCursorVisible()
+
+    def take_complete_rx_terminal_frames(self):
+        if self.config.terminal.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+            return self.take_fixed_length_rx_terminal_frames()
+        return self.take_terminator_rx_terminal_frames()
+
+    def take_terminator_rx_terminal_frames(self):
+        output = []
+        terminator = self.config.terminal.terminator
+        terminator_len = len(terminator)
+
+        while True:
+            index = self.rx_terminal_pending.find(terminator)
+            if index < 0:
+                break
+
+            end = index + terminator_len
+            output.append(self.format_rx_terminal_line(bytes(self.rx_terminal_pending[:end])))
+            del self.rx_terminal_pending[:end]
+
+        return "".join(output)
+
+    def take_fixed_length_rx_terminal_frames(self):
+        output = []
+        length = self.config.terminal.fixed_length
+
+        while len(self.rx_terminal_pending) >= length:
+            output.append(self.format_rx_terminal_line(bytes(self.rx_terminal_pending[:length])))
+            del self.rx_terminal_pending[:length]
+
+        return "".join(output)
+
+    def flush_rx_terminal_pending(self):
+        if not self.rx_terminal_pending:
             return
 
-        buf = curve_info["buf"]
-        idx = curve_info["idx"]
+        self.rx_terminal_flush_timer.stop()
+        text = self.format_rx_terminal_line(bytes(self.rx_terminal_pending))
+        self.rx_terminal_pending.clear()
+        self.append_terminal_text(text)
 
-        if num_new >= MAX_POINTS:
-            buf[:] = values[-MAX_POINTS:]
-            curve_info["idx"] = MAX_POINTS
-        elif idx + num_new <= MAX_POINTS:
-            buf[idx : idx + num_new] = values
-            curve_info["idx"] += num_new
-        else:
-            overflow = idx + num_new - MAX_POINTS
-            keep_len = idx - overflow
-            buf[:keep_len] = buf[overflow:idx]
-            buf[keep_len:] = values
-            curve_info["idx"] = MAX_POINTS
+    def format_rx_terminal_line(self, raw_rx):
+        if self.config.terminal.display_mode == RX_TERMINAL_DISPLAY_MODES.ASCII_HEX:
+            return f"ASCII: {self.format_rx_ascii(raw_rx, preserve_layout=False)} | HEX: {self.format_rx_hex(raw_rx)}\n"
+
+        if self.config.terminal.display_mode == RX_TERMINAL_DISPLAY_MODES.HEX:
+            return f"HEX: {self.format_rx_hex(raw_rx)}\n"
+
+        if self.config.terminal.frame_mode == RX_TERMINAL_FRAME_MODES.FIXED_LENGTH:
+            return f"{self.format_rx_ascii(raw_rx, preserve_layout=True)}\n"
+
+        return self.format_rx_ascii(raw_rx, preserve_layout=True)
+
+    def format_rx_ascii(self, raw_rx, preserve_layout):
+        text_parts = []
+        for value in raw_rx:
+            if 0x20 <= value <= 0x7E:
+                text_parts.append(chr(value))
+            elif preserve_layout and value in (0x09, 0x0A, 0x0D):
+                text_parts.append(chr(value))
+            else:
+                text_parts.append(ASCII_CONTROL_LABELS.get(value, f"[0x{value:02X}]"))
+        return "".join(text_parts)
+
+    def format_rx_hex(self, raw_rx):
+        return raw_rx.hex(" ").upper()
+
 # ========================================================
-    def update_line_ascii(self, packets):
-        # 多線段 ASCII 模式解析: "<name> = <value>"
-        try:
-            pending_values = {}
-            for pak in packets:
-                if b'=' not in pak:     continue        # 辨識是否有 '='
-                
-                parts = pak.split(b'=')
-                if len(parts) != 2:     continue        # 拆分左值與右值失敗
-                
-                name = parts[0].strip().decode('ascii', errors='ignore')
-                val_str = parts[1].strip()
-                
-                try:
-                    val = self.convert_func(val_str)
-                except:                 continue        # 轉換失敗
-
-                # print("{}={}".format(name, val))
-                
-                pending_values.setdefault(name, []).append(val)
-
-            # 同一批資料依線段分組後再批次更新Buffer，避免滿Buffer時逐筆搬移
-            for name, values in pending_values.items():
-                curve_info = self._get_or_create_curve(name)
-                if not curve_info:      continue        # 取得線條資料失敗
-                self._append_curve_values(curve_info, values)
-
-            # 尋找資料最長的線段
-            if self.curves_data:
-                self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
-
-            # 更新繪圖與自動調整畫面
-            for name in pending_values:
-                if name not in self.curves_data:
-                    continue
-                info = self.curves_data[name]
-                v_len = self.max_current_idx        # 有效資料點數量 (僅傳有效資料給curve)
-                info["curve"].setData(info["buf"][:v_len], connect="finite")
-            
-            # 調整 X 軸範圍 (從 0 到最長點)
-            if self.max_current_idx > 0:
-                self.update_x_range()
-
-        except Exception as e:
-            print(f"Multi-line process error: {e}")
 # ========================================================
-    def handleRxData(self):
-        try:
-            new_rx = self.ser.read_all()        # 讀取目前所有可用 bytes
-        except:
-            self.conncet_toggle(False)          # read_all失敗, turn off COM
-            return
-        
-        if not new_rx:
-            return
-        self.rxHandle(new_rx)
 # ========================================================
-    def update_validation_sin(self):
-        VALIDATION_SIN_POINTS = 5       # 每次Timer更新新增幾個sin點
-        VALIDATION_SIN_STEP = 0.08      # sin相位步進
-        VALIDATION_SIN_AMPLITUDE = 24689
-        VALIDATION_SIN_OFFSET = 7777
-
-        if LINE_MODE == LINE_MODES.SINGLE_LINE:
-            curve_info = self.curves_data.get("default")
-        else:
-            curve_info = self._get_or_create_curve("sin")
-
-        if not curve_info:
-            return
-
-        for _ in range(VALIDATION_SIN_POINTS):
-            value = (math.sin(self.validation_sin_phase) * VALIDATION_SIN_AMPLITUDE) + VALIDATION_SIN_OFFSET
-            self._append_curve_value(curve_info, value)
-            self.validation_sin_phase += VALIDATION_SIN_STEP
-
-        self.max_current_idx = max(info["idx"] for info in self.curves_data.values())
-        v_len = self.max_current_idx
-        curve_info["curve"].setData(curve_info["buf"][:v_len], connect="finite")
-
-        if self.max_current_idx > 0:
-            self.update_x_range()
+    def create_rx_plot_parser(self):
+        config = self.create_rx_parser_config()
+        return RxPlotParser(
+            config.sep_mode,
+            config.line_mode,
+            config.value_type,
+            config.value_fmt,
+            config.value_size,
+            config.sep,
+            config.len_end,
+            config.offset,
+        )
+# ========================================================
+    def create_rx_parser_config(self):
+        return self.config.plot.to_parser_config()
+# ========================================================
+    def rx_failed(self, message):
+        print(message)
+        self.disconnect_serial("RX failed")
 # ========================================================
     def update(self):
-        if DEBUG_LINE_ENABLE:
-            self.update_validation_sin()        # test line feature
-        self.handleRxData()                     # 讀取serial資料並處理
-# ========================================================
-    def mouseMoved(self, evt):
-        pos = evt[0]        # 滑鼠在 Scene 中的位置
-        if self.plot.sceneBoundingRect().contains(pos):
-            mousePoint = self.plot.vb.mapSceneToView(pos)
-            self.vLine.setPos(mousePoint.x())       # 更新十字線位置
-            self.hLine.setPos(mousePoint.y())
-            self.label.setText(f"X: {mousePoint.x():.1f}\nY: {mousePoint.y():.2f}")
-            self.label.setPos(mousePoint.x(), mousePoint.y())   # 跟著滑鼠跑
-            
+        self.plot_window.update_validation_data()
+
 # ========================================================
     # ----- Start/Stop
-    def conncet_toggle(self, checked):
-        if checked:
-            self.btn_connect.setStyleSheet("background-color : palegreen")
-            self.btn_connect.setText("🟢 Running")
-            self.clear_data()
-            self.timer.start(UPDATE_INTERVAL)
-            self.ser.open()
-            self.ser.reset_input_buffer()
-            self.tx_input.setEnabled(True)
-            self.combo_tx_line_end.setEnabled(True)
-            self.btn_send.setEnabled(True)
-            self.com_status_icon.setText("🟢")
-            self.tx_status.setText("COM opened")
-        else:
-            self.timer.stop()
-            self.btn_connect.setStyleSheet("background-color : lightpink")
-            self.btn_connect.setText("🔴 Stop")
-            if self.ser.is_open:
-                self.ser.close()
-            self.tx_input.setEnabled(False)
-            self.combo_tx_line_end.setEnabled(False)
-            self.btn_send.setEnabled(False)
-            self.com_status_icon.setText("🔴")
-            self.tx_status.setText("COM closed")
-        
-    # ----- RectMode
-    def rect_mode_toggle(self, checked):
-        if checked:     self.plot.vb.setMouseMode(pg.ViewBox.RectMode)
-        else:           self.plot.vb.setMouseMode(pg.ViewBox.PanMode)
-    # ----- Follow X
-    def follow_x_toggle(self, checked):
-        self.spin_x_width.setEnabled(checked)
-        if checked:
-            self.update_x_range()
-    def update_x_range(self):
-        if not self.btn_followX.isChecked():
+    def connect_serial(self):
+        if self.ser.is_open:
+            return
+        if self.rx_controller.thread is not None:
+            self.tx_status.setText("Waiting for RX to stop")
             return
 
-        x_width = self.spin_x_width.value()
-        x_end = max(self.max_current_idx, x_width)
-        x_start = x_end - x_width
-        self.plot.setXRange(x_start, x_end, padding=0)
-    # ----- Cursor
-    def cursor_toggle(self, checked):
-        if checked:     self.cursor_show()
-        else:           self.cursor_hide()
-    def cursor_show(self):
-        self.vLine.show()
-        self.hLine.show()
-        self.label.show()
-        if self.mouse_proxy is None:        # 連結 mouseMoved() 事件
-            self.mouse_proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=30, slot=self.mouseMoved)
-    def cursor_hide(self):
-        self.vLine.hide()
-        self.hLine.hide()
-        self.label.hide()
-        if self.mouse_proxy is not None:
-            self.mouse_proxy.disconnect()   # 斷開訊號
-            self.mouse_proxy = None         # 清空物件，停止監聽
-    # ----- Auto Y
-    def auto_y(self):
-        y_range = self._get_data_y_range()
-        if y_range is None:
-            return            
-        self.plot.setYRange(y_range[0], y_range[1], padding=0.05)
+        self.plot_window.clear_data()
+        if self.config.plot.debug_line_enabled:
+            self.timer.start(self.config.rx_interval_ms)
 
-    def _get_data_y_range(self):
-        if not self.curves_data:
-            return None
+        try:
+            apply_serial_config(self.ser, self.config.comm)
+            self.ser.open()
+            self.ser.reset_input_buffer()
+            self.rx_controller.start(self.ser, self.create_rx_plot_parser())
+        except Exception as e:
+            print(f"COM open error: {e}")
+            self.timer.stop()
+            if self.ser.is_open:
+                self.ser.close()
+            self.set_connected_ui(False, "COM open error")
+            return
 
-        y_min = None
-        y_max = None
-        for info in self.curves_data.values():
-            idx = min(info["idx"], MAX_POINTS)
-            if idx <= 0:
-                continue
+        self.set_connected_ui(True)
 
-            values = info["buf"][:idx]
-            values = values[np.isfinite(values)]
-            if not values.size:
-                continue
+    def disconnect_serial(self, status_text="COM closed"):
+        self.timer.stop()
+        self.rx_controller.stop()
+        if self.ser.is_open:
+            self.ser.close()
+        self.set_connected_ui(False, status_text)
 
-            curve_min = float(np.min(values))
-            curve_max = float(np.max(values))
-            y_min = curve_min if y_min is None else min(y_min, curve_min)
-            y_max = curve_max if y_max is None else max(y_max, curve_max)
+    def set_connected_ui(self, connected, status_text=None):
+        self.tx_input.setEnabled(connected)
+        self.combo_tx_line_end.setEnabled(connected)
+        self.btn_send.setEnabled(connected)
+        self.update_toolbar_actions(connected)
+        self.update_plot_settings_enabled()
+        self.com_status_icon.setText("🟢" if connected else "🔴")
+        if status_text is None:
+            status_text = "COM opened" if connected else "COM closed"
+        self.tx_status.setText(status_text)
 
-        if y_min is None or y_max is None:
-            return None
 
-        if y_min == y_max:
-            margin = max(abs(y_min) * 0.05, 1.0)
-            return y_min - margin, y_max + margin
-
-        return y_min, y_max
-    # ----- Clear
-    def clear_data(self):
-        self.residual = b""
-        self.max_current_idx = 0
-
-        # 將已建立的線段進行重設
-        for name, info in self.curves_data.items():
-            info["buf"].fill(np.nan)
-            info["idx"] = 0
-            info["curve"].setData(info["buf"])
-
-        self.update_x_range()
 # ========================================================
     def run(self):
         self.main_win.show()
