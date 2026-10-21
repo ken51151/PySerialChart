@@ -24,7 +24,7 @@ from serial_rx import RxPlotParser, SerialRxController
 
 WINDOWS_TITLE = 'SerialChart'
 VERSION_MAJOR = 0
-VERSION_MINOR = 3
+VERSION_MINOR = 4
 VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}"
 ICON_DIR = Path(__file__).resolve().parent / "assets" / "icons"
 
